@@ -32,7 +32,7 @@ class SynchronizationController extends Controller
                 return null;
             }
 
-            $data = json_decode($response->body());
+            $data = json_decode($response)->ListaCreditosSEFIL;
 
             if ($data === null) {
                 Log::channel('credits')->warning("La respuesta de FACES_LIST_CREDITS es null o JSON inválido", [
@@ -262,7 +262,7 @@ class SynchronizationController extends Controller
             ];
         }
     }
-    
+
     private function syncContactsForBatch(array $batch)
     {
         $stats = [
