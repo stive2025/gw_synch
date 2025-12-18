@@ -20,7 +20,7 @@ class SynchronizationController extends Controller
     private function getListCredits(string $query_date){
         try {
             $response = Http::post(env('FACES_LIST_CREDITS'), [
-                'query' => [
+                [
                     'credFechaConsulta' => $query_date
                 ]
             ]);
@@ -122,6 +122,9 @@ class SynchronizationController extends Controller
     }
 
     public function syncCredits(){
+        Log::channel('credits')->info("-----------------------------------------------------------------------");
+        Log::channel('credits')->info("Iniciando proceso de sincronización de créditos");
+        Log::channel('credits')->info($this::getQueryDate());
         $credits = $this->getListCredits($this::getQueryDate());
 
         $batchSize = 500;
