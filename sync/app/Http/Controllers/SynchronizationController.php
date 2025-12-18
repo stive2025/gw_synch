@@ -20,10 +20,10 @@ class SynchronizationController extends Controller
     private function getListCredits(string $query_date){
         try {
             $response = Http::post(env('FACES_LIST_CREDITS'), [
-                [
-                    'credFechaConsulta' => $query_date
-                ]
+                'credFechaConsulta' => $query_date
             ]);
+
+            Log::channel('credits')->info($response);
 
             if ($response->failed()) {
                 Log::channel('credits')->error("Error en la petición HTTP a FACES_LIST_CREDITS", [
@@ -54,9 +54,7 @@ class SynchronizationController extends Controller
     private function getListContacts(string $sync_id){
         try {
             $response = Http::post(env('FACES_LIST_CONTACTS'), [
-                'query' => [
-                    'credNumeroOperacion' => $sync_id
-                ]
+                'credNumeroOperacion' => $sync_id
             ]);
 
             if ($response->failed()) {
@@ -88,10 +86,8 @@ class SynchronizationController extends Controller
     private function getListPays(string $query_date, string $sync_id){
         try {
             $response = Http::post(env('FACES_LIST_PAYS'), [
-                'query' => [
-                    'credNumeroOperacion' => $query_date,
-                    'credFechaConsulta' => $sync_id
-                ]
+                'credNumeroOperacion' => $query_date,
+                'credFechaConsulta' => $sync_id
             ]);
 
             if ($response->failed()) {
