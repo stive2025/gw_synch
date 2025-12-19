@@ -520,7 +520,8 @@ class SynchronizationController extends Controller
             'created' => $stats['addresses_created']
         ]);
 
-        $relationshipsToInsert = [];
+        // FASE 5: Relaciones Client-Credit
+        $relationshipsMap = []; // Usar map para evitar duplicados
 
         $creditSyncIds = array_unique(array_map(function($contact) {
             return $contact->credit_sync_id;
@@ -558,14 +559,26 @@ class SynchronizationController extends Controller
             $creditId = $creditsBySyncId->get($creditSyncId)->id;
             $type = $contact->type ?? 'TITULAR';
 
-            $relationshipsToInsert[] = [
-                'client_id' => $clientId,
-                'credit_id' => $creditId,
-                'type' => $type,
-                'created_at' => $now,
-                'updated_at' => $now
-            ];
+            // Usar clave única para evitar duplicados en el array
+            $key = $clientId . '|' . $creditId;
+
+            // Solo agregar si no existe o actualizar el type (el último prevalece)
+            if (!isset($relationshipsMap[$key])) {
+                $relationshipsMap[$key] = [
+                    'client_id' => $clientId,
+                    'credit_id' => $creditId,
+                    'type' => $type,
+                    'created_at' => $now,
+                    'updated_at' => $now
+                ];
+            } else {
+                // Si ya existe en el array, actualizar el type (último prevalece)
+                $relationshipsMap[$key]['type'] = $type;
+                $relationshipsMap[$key]['updated_at'] = $now;
+            }
         }
+
+        $relationshipsToInsert = array_values($relationshipsMap);
 
         if (!empty($relationshipsToInsert)) {
             $clientIds = array_unique(array_column($relationshipsToInsert, 'client_id'));
