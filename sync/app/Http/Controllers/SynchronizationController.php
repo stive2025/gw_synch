@@ -576,14 +576,15 @@ class SynchronizationController extends Controller
                 ->whereIn('credit_id', $creditIds)
                 ->get()
                 ->map(function($rel) {
-                    return $rel->client_id . '|' . $rel->credit_id;
+                    return $rel->client_id . '|' . $rel->credit_id . '|' . $rel->type;
                 })
                 ->toArray();
 
             $existingRelSet = array_flip($existingRelationships);
 
+            // Filtrar: solo insertar combinaciones únicas de client_id + credit_id + type
             $relationshipsToInsert = array_filter($relationshipsToInsert, function($rel) use ($existingRelSet) {
-                $key = $rel['client_id'] . '|' . $rel['credit_id'];
+                $key = $rel['client_id'] . '|' . $rel['credit_id'] . '|' . $rel['type'];
                 return !isset($existingRelSet[$key]);
             });
 
