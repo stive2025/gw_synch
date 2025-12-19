@@ -498,21 +498,77 @@ class SynchronizationController extends Controller
             $existingAddresses = DB::table(env('SCHEMA_API_DIRECTION'))
                 ->whereIn('client_id', $clientIds)
                 ->get()
-                ->map(function($addr) {
+                ->keyBy(function($addr) {
                     return $addr->client_id . '|' . $addr->type;
-                })
-                ->toArray();
+                });
 
-            $existingAddressesSet = array_flip($existingAddresses);
+            $toInsert = [];
+            $toUpdate = [];
 
-            $addressesToInsert = array_filter($addressesToInsert, function($addr) use ($existingAddressesSet) {
+            foreach ($addressesToInsert as $addr) {
                 $key = $addr['client_id'] . '|' . $addr['type'];
-                return !isset($existingAddressesSet[$key]);
-            });
 
-            if (!empty($addressesToInsert)) {
-                DB::table(env('SCHEMA_API_DIRECTION'))->insert($addressesToInsert);
-                $stats['addresses_created'] = count($addressesToInsert);
+                if ($existingAddresses->has($key)) {
+                    // Existe, verificar si los datos son diferentes
+                    $existing = $existingAddresses->get($key);
+
+                    $hasChanges = (
+                        $existing->address !== $addr['address'] ||
+                        $existing->province !== $addr['province'] ||
+                        $existing->canton !== $addr['canton'] ||
+                        $existing->parish !== $addr['parish'] ||
+                        $existing->neighborhood !== $addr['neighborhood'] ||
+                        $existing->latitude !== $addr['latitude'] ||
+                        $existing->longitude !== $addr['longitude']
+                    );
+
+                    if ($hasChanges) {
+                        // Solo actualizar si hay cambios
+                        $toUpdate[] = [
+                            'client_id' => $addr['client_id'],
+                            'type' => $addr['type'],
+                            'address' => $addr['address'],
+                            'province' => $addr['province'],
+                            'canton' => $addr['canton'],
+                            'parish' => $addr['parish'],
+                            'neighborhood' => $addr['neighborhood'],
+                            'latitude' => $addr['latitude'],
+                            'longitude' => $addr['longitude'],
+                            'updated_at' => $now
+                        ];
+                    }
+                    // Si no hay cambios, skip (no hacer nada)
+                } else {
+                    // No existe, insertar
+                    $toInsert[] = $addr;
+                }
+            }
+
+            // Bulk insert de direcciones nuevas
+            if (!empty($toInsert)) {
+                DB::table(env('SCHEMA_API_DIRECTION'))->insert($toInsert);
+                $stats['addresses_created'] = count($toInsert);
+            }
+
+            // Update de direcciones con datos diferentes
+            foreach ($toUpdate as $updateData) {
+                DB::table(env('SCHEMA_API_DIRECTION'))
+                    ->where('client_id', $updateData['client_id'])
+                    ->where('type', $updateData['type'])
+                    ->update([
+                        'address' => $updateData['address'],
+                        'province' => $updateData['province'],
+                        'canton' => $updateData['canton'],
+                        'parish' => $updateData['parish'],
+                        'neighborhood' => $updateData['neighborhood'],
+                        'latitude' => $updateData['latitude'],
+                        'longitude' => $updateData['longitude'],
+                        'updated_at' => $updateData['updated_at']
+                    ]);
+            }
+
+            if (!empty($toUpdate)) {
+                Log::channel('credits')->info("Updated " . count($toUpdate) . " addresses with new data");
             }
         }
 
