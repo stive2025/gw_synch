@@ -717,7 +717,8 @@ class SynchronizationController extends Controller
         $credits = DB::table(env('SCHEMA_API_CREDIT'))
             ->where('last_sync_date','>=', $queryDate)
             ->where('business_id', env('BUSINESS_ID'))
-            ->get();
+            ->get()
+            ->toArray();
 
         if (empty($credits)) {
             Log::channel('credits')->warning("No se encontraron créditos para sincronizar pagos");
