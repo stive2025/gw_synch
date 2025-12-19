@@ -571,26 +571,57 @@ class SynchronizationController extends Controller
             $clientIds = array_unique(array_column($relationshipsToInsert, 'client_id'));
             $creditIds = array_unique(array_column($relationshipsToInsert, 'credit_id'));
 
+            // Obtener relaciones existentes (constraint unique en client_id + credit_id)
             $existingRelationships = DB::table('client_credit')
                 ->whereIn('client_id', $clientIds)
                 ->whereIn('credit_id', $creditIds)
                 ->get()
-                ->map(function($rel) {
-                    return $rel->client_id . '|' . $rel->credit_id . '|' . $rel->type;
-                })
-                ->toArray();
+                ->keyBy(function($rel) {
+                    return $rel->client_id . '|' . $rel->credit_id;
+                });
 
-            $existingRelSet = array_flip($existingRelationships);
+            $toInsert = [];
+            $toUpdate = [];
 
-            // Filtrar: solo insertar combinaciones únicas de client_id + credit_id + type
-            $relationshipsToInsert = array_filter($relationshipsToInsert, function($rel) use ($existingRelSet) {
-                $key = $rel['client_id'] . '|' . $rel['credit_id'] . '|' . $rel['type'];
-                return !isset($existingRelSet[$key]);
-            });
+            foreach ($relationshipsToInsert as $rel) {
+                $key = $rel['client_id'] . '|' . $rel['credit_id'];
 
-            if (!empty($relationshipsToInsert)) {
-                DB::table('client_credit')->insert($relationshipsToInsert);
-                $stats['relationships_created'] = count($relationshipsToInsert);
+                if ($existingRelationships->has($key)) {
+                    // Si existe, actualizar el type si es diferente
+                    $existing = $existingRelationships->get($key);
+                    if ($existing->type !== $rel['type']) {
+                        $toUpdate[] = [
+                            'client_id' => $rel['client_id'],
+                            'credit_id' => $rel['credit_id'],
+                            'type' => $rel['type'],
+                            'updated_at' => $now
+                        ];
+                    }
+                } else {
+                    // Si no existe, insertar
+                    $toInsert[] = $rel;
+                }
+            }
+
+            // Bulk insert de nuevas relaciones
+            if (!empty($toInsert)) {
+                DB::table('client_credit')->insert($toInsert);
+                $stats['relationships_created'] = count($toInsert);
+            }
+
+            // Update de relaciones existentes con type diferente
+            foreach ($toUpdate as $updateData) {
+                DB::table('client_credit')
+                    ->where('client_id', $updateData['client_id'])
+                    ->where('credit_id', $updateData['credit_id'])
+                    ->update([
+                        'type' => $updateData['type'],
+                        'updated_at' => $updateData['updated_at']
+                    ]);
+            }
+
+            if (!empty($toUpdate)) {
+                Log::channel('credits')->info("Updated " . count($toUpdate) . " relationship types");
             }
         }
 
