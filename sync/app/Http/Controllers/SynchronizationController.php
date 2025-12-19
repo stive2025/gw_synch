@@ -799,8 +799,10 @@ class SynchronizationController extends Controller
                     if (!isset($paymentsMap[$key])) {
                         $paymentsMap[$key] = [
                             'credit_id' => $payment->credit_id ?? null,
-                            'fee_id' => $payment->fee_id ?? null,
-                            'payment_id' => $payment->payment_id ?? null,
+                            'business_id' => env('BUSINESS_ID'),
+                            'campain_id' => env('CAMPAIN_ID'),
+                            'fee' => $payment->fee_id ?? null,
+                            'payment_reference' => $payment->payment_id ?? null,
                             'payment_type' => $payment->payment_type ?? null,
                             'payment_value' => $payment->payment_value ?? null,
                             'payment_date' => $payment->payment_date ?? null,
@@ -815,13 +817,15 @@ class SynchronizationController extends Controller
                 }
 
                 $paymentsToInsert = array_values($paymentsMap);
-                $existingPaymentsQuery = DB::table('payments');
+                $existingPaymentsQuery = DB::table(env('SCHEMA_API_PAYS'));
 
                 foreach ($paymentsToInsert as $payment) {
                     $existingPaymentsQuery->orWhere(function($query) use ($payment) {
                         $query->where('credit_id', $payment['credit_id'])
-                            ->where('fee_id', $payment['fee_id'])
-                            ->where('payment_id', $payment['payment_id'])
+                            ->where('business_id',env('BUSINESS_ID'))
+                            ->where('campain_id',env('CAMPAIN_ID'))
+                            ->where('fee', $payment['fee'])
+                            ->where('payment_reference', $payment['payment_reference'])
                             ->where('payment_type', $payment['payment_type'])
                             ->where('payment_value', $payment['payment_value'])
                             ->where('payment_date', $payment['payment_date'])
@@ -837,8 +841,10 @@ class SynchronizationController extends Controller
                     ->map(function($pay) {
                         return implode('|', [
                             $pay->credit_id,
-                            $pay->fee_id,
-                            $pay->payment_id,
+                            $pay->business_id,
+                            $pay->campain_id,
+                            $pay->fee,
+                            $pay->payment_reference,
                             $pay->payment_type,
                             $pay->payment_value,
                             $pay->payment_date,
@@ -857,8 +863,10 @@ class SynchronizationController extends Controller
                 foreach ($paymentsToInsert as $payment) {
                     $key = implode('|', [
                         $payment['credit_id'],
-                        $payment['fee_id'],
-                        $payment['payment_id'],
+                        $payment['business_id'],
+                        $payment['campain_id'],
+                        $payment['fee'],
+                        $payment['payment_reference'],
                         $payment['payment_type'],
                         $payment['payment_value'],
                         $payment['payment_date'],
