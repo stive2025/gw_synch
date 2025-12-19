@@ -783,13 +783,33 @@ class SynchronizationController extends Controller
                 $now = now();
 
                 foreach ($allPayments as $payment) {
+                    // Convertir payment_date de d/m/Y H:i:s a Y-m-d H:i:s
+                    $paymentDate = null;
+                    if (!empty($payment->payment_date)) {
+                        try {
+                            $date = \DateTime::createFromFormat('d/m/Y H:i:s', $payment->payment_date);
+                            if ($date) {
+                                $paymentDate = $date->format('Y-m-d H:i:s');
+                            } else {
+                                Log::channel('credits')->warning("Invalid payment_date format", [
+                                    'payment_date' => $payment->payment_date
+                                ]);
+                            }
+                        } catch (\Exception $e) {
+                            Log::channel('credits')->error("Error parsing payment_date", [
+                                'payment_date' => $payment->payment_date,
+                                'error' => $e->getMessage()
+                            ]);
+                        }
+                    }
+
                     $key = implode('|', [
                         $payment->credit_id ?? '',
                         $payment->fee_id ?? '',
                         $payment->payment_id ?? '',
                         $payment->payment_type ?? '',
                         $payment->payment_value ?? '',
-                        $payment->payment_date ?? '',
+                        $paymentDate ?? '',
                         $payment->capital ?? '',
                         $payment->interes ?? '',
                         $payment->interes_mora ?? '',
@@ -805,7 +825,7 @@ class SynchronizationController extends Controller
                             'payment_reference' => $payment->payment_id ?? null,
                             'payment_type' => $payment->payment_type ?? null,
                             'payment_value' => $payment->payment_value ?? null,
-                            'payment_date' => $payment->payment_date ?? null,
+                            'payment_date' => $paymentDate,
                             'capital' => $payment->capital ?? null,
                             'interest' => $payment->interes ?? null,
                             'mora' => $payment->interes_mora ?? null,
