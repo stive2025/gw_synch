@@ -711,7 +711,7 @@ class SynchronizationController extends Controller
         $last_month = strval(intval($currently_month) - 1);
         $currently_year = date('Y');
         // Con esto búscamos pagos con créditos que se inactivaron en la anterior campaña
-        $queryDate = "01/{$last_month}/{$currently_year}";
+        $queryDate = "{$currently_year}/{$last_month}/01";
         $currentlyQueryDate = $this::getQueryDate();
 
         $credits = DB::table(env('SCHEMA_API_CREDIT'))
