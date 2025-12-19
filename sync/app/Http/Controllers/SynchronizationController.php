@@ -64,7 +64,7 @@ class SynchronizationController extends Controller
                 return null;
             }
 
-            $data = json_decode($response->body());
+            $data = json_decode($response)->ListaContactosSEFIL;
 
             if ($data === null) {
                 Log::channel('credits')->warning("La respuesta de FACES_LIST_CONTACTS es null o JSON inválido", [
@@ -393,7 +393,8 @@ class SynchronizationController extends Controller
                 foreach ($mobilePhones as $phone) {
                     $phonesToInsert[] = [
                         'client_id' => $clientId,
-                        'phone' => $phone,
+                        'phone_status'=>'ACTIVE',
+                        'phone_number' => $phone,
                         'phone_type' => 'MÓVIL',
                         'created_at' => $now,
                         'updated_at' => $now
@@ -410,7 +411,8 @@ class SynchronizationController extends Controller
                 foreach ($landlinePhones as $phone) {
                     $phonesToInsert[] = [
                         'client_id' => $clientId,
-                        'phone' => $phone,
+                        'phone_status'=>'ACTIVE',
+                        'phone_number' => $phone,
                         'phone_type' => 'FIJO',
                         'created_at' => $now,
                         'updated_at' => $now
@@ -425,14 +427,14 @@ class SynchronizationController extends Controller
                 ->whereIn('client_id', $clientIds)
                 ->get()
                 ->map(function($phone) {
-                    return $phone->client_id . '|' . $phone->phone;
+                    return $phone->client_id . '|' . $phone->phone_number;
                 })
                 ->toArray();
 
             $existingPhonesSet = array_flip($existingPhones);
             
             $phonesToInsert = array_filter($phonesToInsert, function($phone) use ($existingPhonesSet) {
-                $key = $phone['client_id'] . '|' . $phone['phone'];
+                $key = $phone['client_id'] . '|' . $phone['phone_number'];
                 return !isset($existingPhonesSet[$key]);
             });
 
@@ -464,11 +466,10 @@ class SynchronizationController extends Controller
                     'address' => $addr->address ?? null,
                     'province' => $addr->province ?? null,
                     'canton' => $addr->canton ?? null,
-                    'parroquia' => $addr->parroquia ?? null,
+                    'parish' => $addr->parroquia ?? null,
                     'neighborhood' => $addr->neighborhood ?? null,
-                    'cod_neighborhood' => $addr->cod_neighborhood ?? null,
                     'latitude' => $addr->latitude ?? null,
-                    'length' => $addr->length ?? null,
+                    'longitude' => $addr->length ?? null,
                     'created_at' => $now,
                     'updated_at' => $now
                 ];
@@ -482,11 +483,10 @@ class SynchronizationController extends Controller
                     'address' => $addr->address ?? null,
                     'province' => $addr->province ?? null,
                     'canton' => $addr->canton ?? null,
-                    'parroquia' => $addr->parroquia ?? null,
+                    'parish' => $addr->parroquia ?? null,
                     'neighborhood' => $addr->neighborhood ?? null,
-                    'cod_neighborhood' => $addr->cod_neighborhood ?? null,
                     'latitude' => $addr->latitude ?? null,
-                    'length' => $addr->length ?? null,
+                    'longitude' => $addr->length ?? null,
                     'created_at' => $now,
                     'updated_at' => $now
                 ];
