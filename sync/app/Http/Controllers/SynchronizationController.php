@@ -97,7 +97,7 @@ class SynchronizationController extends Controller
                 return null;
             }
 
-            $data = json_decode($response->body());
+            $data = json_decode($response)->ListaPagosSEFIL;
 
             if ($data === null) {
                 Log::channel('credits')->warning("La respuesta de FACES_LIST_PAYS es null o JSON inválido", [
@@ -119,7 +119,6 @@ class SynchronizationController extends Controller
 
     public function syncCredits(){
         Log::channel('credits')->info("-----------------------------------------------------------------------");
-        Log::channel('credits')->info("Iniciando proceso de sincronización de créditos");
         Log::channel('credits')->info($this::getQueryDate());
         $credits = $this->getListCredits($this::getQueryDate());
 
@@ -261,7 +260,7 @@ class SynchronizationController extends Controller
             ];
         }
     }
-
+    
     private function syncContactsForBatch(array $batch)
     {
         $stats = [
@@ -699,6 +698,220 @@ class SynchronizationController extends Controller
         return $stats;
     }
 
+    /**
+     * Sincronizar pagos desde la API FACES
+     *
+     * @return array Estadísticas de sincronización de pagos
+     */
+    public function syncPays()
+    {
+        Log::channel('credits')->info("Iniciando sincronización de pagos");
+
+        $currently_month = date('m');
+        $last_month = strval(intval($currently_month) - 1);
+        $currently_year = date('Y');
+        // Con esto búscamos pagos con créditos que se inactivaron en la anterior campaña
+        $queryDate = "01/{$last_month}/{$currently_year}";
+        $currentlyQueryDate = $this::getQueryDate();
+
+        $credits = DB::table(env('SCHEMA_API_CREDIT'))
+            ->where('last_sync_date','>=', $queryDate)
+            ->where('business_id', env('BUSINESS_ID'))
+            ->get();
+
+        if (empty($credits)) {
+            Log::channel('credits')->warning("No se encontraron créditos para sincronizar pagos");
+            return [
+                'success' => false,
+                'message' => 'No se encontraron créditos para sincronizar pagos',
+                'payments_created' => 0
+            ];
+        }
+
+        $batchSize = 500;
+        $totalPaymentsCreated = 0;
+        $totalPaymentsSkipped = 0;
+        $errors = 0;
+
+        try {
+            DB::beginTransaction();
+
+            foreach (array_chunk($credits, $batchSize) as $batch) {
+                $allPayments = [];
+
+                // Recolectar pagos de todos los créditos en el batch
+                foreach ($batch as $credit) {
+                    try {
+                        // Ya tenemos el credit_id porque obtuvimos los créditos de la BD
+                        $creditId = $credit->id;
+
+                        $payments = $this->getListPays($credit->sync_id, $currentlyQueryDate);
+
+                        if ($payments === null || !is_array($payments)) {
+                            Log::channel('credits')->warning("No payments returned for credit", [
+                                'sync_id' => $credit->sync_id
+                            ]);
+                            $errors++;
+                            continue;
+                        }
+
+                        // Tag cada pago con el credit_id de la tabla credits
+                        foreach ($payments as $payment) {
+                            $payment->credit_id = $creditId;
+                            $allPayments[] = $payment;
+                        }
+
+                    } catch (\Exception $e) {
+                        Log::channel('credits')->error("Error fetching payments for credit", [
+                            'sync_id' => $credit->sync_id,
+                            'error' => $e->getMessage()
+                        ]);
+                        $errors++;
+                        continue;
+                    }
+                }
+
+                if (empty($allPayments)) {
+                    Log::channel('credits')->info("No payments to process for this batch");
+                    continue;
+                }
+
+                Log::channel('credits')->info("Processing " . count($allPayments) . " payments for batch");
+
+                $paymentsMap = [];
+                $now = now();
+
+                foreach ($allPayments as $payment) {
+                    $key = implode('|', [
+                        $payment->credit_id ?? '',
+                        $payment->fee_id ?? '',
+                        $payment->payment_id ?? '',
+                        $payment->payment_type ?? '',
+                        $payment->payment_value ?? '',
+                        $payment->payment_date ?? '',
+                        $payment->capital ?? '',
+                        $payment->interes ?? '',
+                        $payment->interes_mora ?? '',
+                        $payment->otros ?? ''
+                    ]);
+
+                    if (!isset($paymentsMap[$key])) {
+                        $paymentsMap[$key] = [
+                            'credit_id' => $payment->credit_id ?? null,
+                            'fee_id' => $payment->fee_id ?? null,
+                            'payment_id' => $payment->payment_id ?? null,
+                            'payment_type' => $payment->payment_type ?? null,
+                            'payment_value' => $payment->payment_value ?? null,
+                            'payment_date' => $payment->payment_date ?? null,
+                            'capital' => $payment->capital ?? null,
+                            'interest' => $payment->interes ?? null,
+                            'mora' => $payment->interes_mora ?? null,
+                            'other_values' => $payment->otros ?? null,
+                            'created_at' => $now,
+                            'updated_at' => $now
+                        ];
+                    }
+                }
+
+                $paymentsToInsert = array_values($paymentsMap);
+                $existingPaymentsQuery = DB::table('payments');
+
+                foreach ($paymentsToInsert as $payment) {
+                    $existingPaymentsQuery->orWhere(function($query) use ($payment) {
+                        $query->where('credit_id', $payment['credit_id'])
+                            ->where('fee_id', $payment['fee_id'])
+                            ->where('payment_id', $payment['payment_id'])
+                            ->where('payment_type', $payment['payment_type'])
+                            ->where('payment_value', $payment['payment_value'])
+                            ->where('payment_date', $payment['payment_date'])
+                            ->where('capital', $payment['capital'])
+                            ->where('interest', $payment['interest'])
+                            ->where('mora', $payment['mora'])
+                            ->where('other_values', $payment['other_values']);
+                    });
+                }
+
+                $existingPayments = $existingPaymentsQuery
+                    ->get()
+                    ->map(function($pay) {
+                        return implode('|', [
+                            $pay->credit_id,
+                            $pay->fee_id,
+                            $pay->payment_id,
+                            $pay->payment_type,
+                            $pay->payment_value,
+                            $pay->payment_date,
+                            $pay->capital,
+                            $pay->interest,
+                            $pay->mora,
+                            $pay->other_values
+                        ]);
+                    })
+                    ->toArray();
+
+                $existingPaymentsSet = array_flip($existingPayments);
+
+                // Filtrar solo los pagos que NO existen
+                $toInsert = [];
+                foreach ($paymentsToInsert as $payment) {
+                    $key = implode('|', [
+                        $payment['credit_id'],
+                        $payment['fee_id'],
+                        $payment['payment_id'],
+                        $payment['payment_type'],
+                        $payment['payment_value'],
+                        $payment['payment_date'],
+                        $payment['capital'],
+                        $payment['interest'],
+                        $payment['mora'],
+                        $payment['other_values']
+                    ]);
+
+                    if (!isset($existingPaymentsSet[$key])) {
+                        $toInsert[] = $payment;
+                    } else {
+                        $totalPaymentsSkipped++;
+                    }
+                }
+
+                // Bulk insert de pagos nuevos
+                if (!empty($toInsert)) {
+                    DB::table(env('SCHEMA_API_PAYS'))->insert($toInsert);
+                    $totalPaymentsCreated += count($toInsert);
+                    Log::channel('credits')->info("Inserted " . count($toInsert) . " new payments");
+                }
+            }
+
+            DB::commit();
+
+            Log::channel('credits')->info("Payment sync completed", [
+                'created' => $totalPaymentsCreated,
+                'skipped' => $totalPaymentsSkipped,
+                'errors' => $errors
+            ]);
+
+            return [
+                'success' => true,
+                'payments_created' => $totalPaymentsCreated,
+                'payments_skipped' => $totalPaymentsSkipped,
+                'errors' => $errors
+            ];
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::channel('credits')->error('Error sincronizando pagos: ' . $e->getMessage());
+
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+                'payments_created' => $totalPaymentsCreated,
+                'payments_skipped' => $totalPaymentsSkipped,
+                'errors' => $errors
+            ];
+        }
+    }
+
+    //  Para testear sin conexión a FACES
     public function getCreditsToSync($date){
         $credits = $this->getDataTest();
         return json_decode($credits);
