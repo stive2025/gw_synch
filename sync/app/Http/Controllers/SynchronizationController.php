@@ -181,7 +181,8 @@ class SynchronizationController extends Controller
                         'date_offer' => $creditData->oferta ?? '',
                         'date_promise' => $creditData->compromiso ?? '',
                         'date_notification' => $creditData->notificacion ?? '',
-                        'business_id' => 3
+                        'business_id' => env('BUSINESS_ID'),
+                        'last_sync_date' => date('Y/m/d H:i:s',time() - 18000)
                     ];
 
                     if (in_array($creditData->sync_id, $existingCredits)) {

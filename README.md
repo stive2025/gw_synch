@@ -1,6 +1,6 @@
 # GW Synch
 
-Aplicación Laravel para sincronización, ejecutándose en Docker.
+Aplicación Laravel v2.0.0 para sincronización de créditos y pagos vía WEB SERVICE, ejecutándose en Docker.
 
 ## Requisitos
 
