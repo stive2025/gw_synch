@@ -141,6 +141,14 @@ class SynchronizationController extends Controller
         try {
             DB::beginTransaction();
 
+            $inactive_credits = DB::table(env('SCHEMA_API_CREDIT'))
+                ->where('business_id', env('BUSINESS_ID'))
+                ->where('sync_status', 'ACTIVE')
+                ->update([
+                    'sync_status' => 'INACTIVE',
+                    'updated_at' => now()
+                ]);
+
             foreach (array_chunk($credits, $batchSize) as $batch) {
                 $syncIds = array_map(function($credit) {
                     return is_object($credit) ? $credit->sync_id : $credit['sync_id'];
@@ -182,7 +190,8 @@ class SynchronizationController extends Controller
                         'date_promise' => $creditData->compromiso ?? '',
                         'date_notification' => $creditData->notificacion ?? '',
                         'business_id' => env('BUSINESS_ID'),
-                        'last_sync_date' => date('Y/m/d H:i:s',time() - 18000)
+                        'last_sync_date' => date('Y/m/d H:i:s',time() - 18000),
+                        'sync_status' => 'ACTIVE'
                     ];
 
                     if (in_array($creditData->sync_id, $existingCredits)) {
