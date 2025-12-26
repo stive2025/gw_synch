@@ -241,6 +241,7 @@ class SynchronizationController extends Controller
 
             DB::table(env('SCHEMA_API_STATUS_SYNC'))
                 ->where('sync_type', 'SYNC-CREDITS')
+                ->where('state', 'IN-PROGRESS')
                 ->where('business_id', env('BUSINESS_ID'))
                 ->where('campain_id', env('CAMPAIN_ID'))
                 ->orderBy('created_at', 'desc')
@@ -275,6 +276,7 @@ class SynchronizationController extends Controller
 
             DB::table(env('SCHEMA_API_STATUS_SYNC'))
                 ->where('sync_type', 'SYNC-CREDITS')
+                ->where('state', 'IN-PROGRESS')
                 ->where('business_id', env('BUSINESS_ID'))
                 ->where('campain_id', env('CAMPAIN_ID'))
                 ->orderBy('created_at', 'desc')
@@ -968,6 +970,7 @@ class SynchronizationController extends Controller
 
             DB::table(env('SCHEMA_API_STATUS_SYNC'))
                 ->where('sync_type', 'SYNC-PAYS')
+                ->where('state', 'IN-PROGRESS')
                 ->where('business_id', env('BUSINESS_ID'))
                 ->where('campain_id', env('CAMPAIN_ID'))
                 ->orderBy('created_at', 'desc')
@@ -992,6 +995,7 @@ class SynchronizationController extends Controller
 
             DB::table(env('SCHEMA_API_STATUS_SYNC'))
                 ->where('sync_type', 'SYNC-PAYS')
+                ->where('state', 'IN-PROGRESS')
                 ->where('business_id', env('BUSINESS_ID'))
                 ->where('campain_id', env('CAMPAIN_ID'))
                 ->orderBy('created_at', 'desc')
