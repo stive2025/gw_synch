@@ -138,6 +138,15 @@ class SynchronizationController extends Controller
         Log::channel('credits')->info("Iniciando sincronización de {$totalCredits} créditos");
         Log::channel('credits')->info(json_encode($credits));
 
+        DB::table(env('SCHEMA_API_STATUS_SYNC'))->insert([
+            'sync_type' => 'SYNC-CREDITS',
+            'state_description' => 'Inicio de transacciones de sincronización de créditos',
+            'nro_syncs' => $totalCredits,
+            'state'=>'IN-PROGRESS',
+            'business_id' => env('BUSINESS_ID'),
+            'campain_id' => env('CAMPAIN_ID')
+        ]);
+
         try {
             DB::beginTransaction();
 
@@ -230,6 +239,18 @@ class SynchronizationController extends Controller
             Log::channel('credits')->info("-----------------------------------------------------------------------");
             DB::commit();
 
+            DB::table(env('SCHEMA_API_STATUS_SYNC'))
+                ->where('sync_type', 'SYNC-CREDITS')
+                ->where('business_id', env('BUSINESS_ID'))
+                ->where('campain_id', env('CAMPAIN_ID'))
+                ->orderBy('created_at', 'desc')
+                ->limit(1)
+                ->update([
+                    'state' => 'COMPLETED',
+                    'state_description' => 'Sincronización de créditos completada exitosamente',
+                    'updated_at' => now()
+                ]);
+
             return [
                 'success' => true,
                 'credits' => [
@@ -251,7 +272,19 @@ class SynchronizationController extends Controller
         } catch (Exception $e) {
             DB::rollBack();
             Log::channel('credits')->error('Error sincronizando créditos: ' . $e->getMessage());
-            
+
+            DB::table(env('SCHEMA_API_STATUS_SYNC'))
+                ->where('sync_type', 'SYNC-CREDITS')
+                ->where('business_id', env('BUSINESS_ID'))
+                ->where('campain_id', env('CAMPAIN_ID'))
+                ->orderBy('created_at', 'desc')
+                ->limit(1)
+                ->update([
+                    'state' => 'FAILED',
+                    'state_description' => 'Error durante la sincronización de créditos: ' . $e->getMessage(),
+                    'updated_at' => now()
+                ]);
+
             return [
                 'success' => false,
                 'error' => $e->getMessage(),
@@ -720,7 +753,6 @@ class SynchronizationController extends Controller
         $currently_month = date('m');
         $last_month = strval(intval($currently_month) - 1);
         $currently_year = date('Y');
-        // Con esto búscamos pagos con créditos que se inactivaron en la anterior campaña
         $queryDate = "{$currently_year}/{$last_month}/01";
         $currentlyQueryDate = $this::getQueryDate();
 
@@ -743,6 +775,15 @@ class SynchronizationController extends Controller
         $totalPaymentsCreated = 0;
         $totalPaymentsSkipped = 0;
         $errors = 0;
+
+        DB::table(env('SCHEMA_API_STATUS_SYNC'))->insert([
+            'sync_type' => 'SYNC-PAYS',
+            'state_description' => 'Inicio de transacciones de sincronización de pagos',
+            'nro_syncs' => count($credits),
+            'state'=>'IN-PROGRESS',
+            'business_id' => env('BUSINESS_ID'),
+            'campain_id' => env('CAMPAIN_ID')
+        ]);
 
         try {
             DB::beginTransaction();
@@ -793,7 +834,6 @@ class SynchronizationController extends Controller
                 $now = now();
 
                 foreach ($allPayments as $payment) {
-                    // Convertir payment_date de d/m/Y H:i:s a Y-m-d H:i:s
                     $paymentDate = null;
                     if (!empty($payment->payment_date)) {
                         try {
@@ -887,8 +927,6 @@ class SynchronizationController extends Controller
                     ->toArray();
 
                 $existingPaymentsSet = array_flip($existingPayments);
-
-                // Filtrar solo los pagos que NO existen
                 $toInsert = [];
                 foreach ($paymentsToInsert as $payment) {
                     $key = implode('|', [
@@ -913,7 +951,6 @@ class SynchronizationController extends Controller
                     }
                 }
 
-                // Bulk insert de pagos nuevos
                 if (!empty($toInsert)) {
                     DB::table(env('SCHEMA_API_PAYS'))->insert($toInsert);
                     $totalPaymentsCreated += count($toInsert);
@@ -929,6 +966,19 @@ class SynchronizationController extends Controller
                 'errors' => $errors
             ]);
 
+            DB::table(env('SCHEMA_API_STATUS_SYNC'))
+                ->where('sync_type', 'SYNC-PAYS')
+                ->where('business_id', env('BUSINESS_ID'))
+                ->where('campain_id', env('CAMPAIN_ID'))
+                ->orderBy('created_at', 'desc')
+                ->limit(1)
+                ->update([
+                    'state' => 'COMPLETED',
+                    'nro_syncs' => $totalPaymentsCreated,
+                    'state_description' => 'Sincronización de pagos completada exitosamente',
+                    'updated_at' => now()
+                ]);
+
             return [
                 'success' => true,
                 'payments_created' => $totalPaymentsCreated,
@@ -939,6 +989,18 @@ class SynchronizationController extends Controller
         } catch (\Exception $e) {
             DB::rollBack();
             Log::channel('credits')->error('Error sincronizando pagos: ' . $e->getMessage());
+
+            DB::table(env('SCHEMA_API_STATUS_SYNC'))
+                ->where('sync_type', 'SYNC-PAYS')
+                ->where('business_id', env('BUSINESS_ID'))
+                ->where('campain_id', env('CAMPAIN_ID'))
+                ->orderBy('created_at', 'desc')
+                ->limit(1)
+                ->update([
+                    'state' => 'FAILED',
+                    'state_description' => 'Error durante la sincronización de pagos: ' . $e->getMessage(),
+                    'updated_at' => now()
+                ]);
 
             return [
                 'success' => false,
