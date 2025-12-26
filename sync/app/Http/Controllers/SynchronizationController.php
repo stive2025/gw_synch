@@ -136,7 +136,7 @@ class SynchronizationController extends Controller
         $contactErrors = 0;
 
         Log::channel('credits')->info("Iniciando sincronización de {$totalCredits} créditos");
-        Log::channel('credits')->info(json_encode($credits));
+        // Log::channel('credits')->info(json_encode($credits));
 
         DB::table(env('SCHEMA_API_STATUS_SYNC'))->insert([
             'sync_type' => 'SYNC-CREDITS',
