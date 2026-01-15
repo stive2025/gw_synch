@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Http\Request;
 use Exception;
 
 class SynchronizationController extends Controller
@@ -748,7 +749,7 @@ class SynchronizationController extends Controller
      *
      * @return array Estadísticas de sincronización de pagos
      */
-    public function syncPays()
+    public function syncPays(Request $request)
     {
         Log::channel('credits')->info("Iniciando sincronización de pagos");
 
@@ -756,7 +757,7 @@ class SynchronizationController extends Controller
         $last_month = strval(intval($currently_month) - 1);
         $currently_year = date('Y');
         $queryDate = "{$currently_year}/{$last_month}/01";
-        $currentlyQueryDate = $this::getQueryDate();
+        $currentlyQueryDate = $request->input('start_date') ?? $this::getQueryDate();
 
         $credits = DB::table(env('SCHEMA_API_CREDIT'))
             ->where('last_sync_date','>=', $queryDate)
@@ -893,18 +894,9 @@ class SynchronizationController extends Controller
 
                 foreach ($paymentsToInsert as $payment) {
                     $existingPaymentsQuery->orWhere(function($query) use ($payment) {
-                        $query->where('credit_id', $payment['credit_id'])
-                            ->where('business_id',env('BUSINESS_ID'))
-                            ->where('campain_id',env('CAMPAIN_ID'))
-                            ->where('fee', $payment['fee'])
-                            ->where('payment_reference', $payment['payment_reference'])
-                            ->where('payment_type', $payment['payment_type'])
+                        $query->where('payment_reference', $payment['payment_reference'])
                             ->where('payment_value', $payment['payment_value'])
-                            ->where('payment_date', $payment['payment_date'])
-                            ->where('capital', $payment['capital'])
-                            ->where('interest', $payment['interest'])
-                            ->where('mora', $payment['mora'])
-                            ->where('other_values', $payment['other_values']);
+                            ->where('payment_date', $payment['payment_date']);
                     });
                 }
 
@@ -912,18 +904,9 @@ class SynchronizationController extends Controller
                     ->get()
                     ->map(function($pay) {
                         return implode('|', [
-                            $pay->credit_id,
-                            $pay->business_id,
-                            $pay->campain_id,
-                            $pay->fee,
                             $pay->payment_reference,
-                            $pay->payment_type,
                             $pay->payment_value,
-                            $pay->payment_date,
-                            $pay->capital,
-                            $pay->interest,
-                            $pay->mora,
-                            $pay->other_values
+                            $pay->payment_date
                         ]);
                     })
                     ->toArray();
@@ -932,18 +915,9 @@ class SynchronizationController extends Controller
                 $toInsert = [];
                 foreach ($paymentsToInsert as $payment) {
                     $key = implode('|', [
-                        $payment['credit_id'],
-                        $payment['business_id'],
-                        $payment['campain_id'],
-                        $payment['fee'],
                         $payment['payment_reference'],
-                        $payment['payment_type'],
                         $payment['payment_value'],
-                        $payment['payment_date'],
-                        $payment['capital'],
-                        $payment['interest'],
-                        $payment['mora'],
-                        $payment['other_values']
+                        $payment['payment_date']
                     ]);
 
                     if (!isset($existingPaymentsSet[$key])) {
