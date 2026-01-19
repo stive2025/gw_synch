@@ -756,11 +756,12 @@ class SynchronizationController extends Controller
         $currently_month = date('m');
         $last_month = strval(intval($currently_month) - 1);
         $currently_year = date('Y');
-        $queryDate = "{$currently_year}/{$last_month}/01";
+        
+        $queryDate = "{$currently_year}-" . str_pad($last_month, 2, '0', STR_PAD_LEFT) . "-01";
         $currentlyQueryDate = $request->input('start_date') ?? $this::getQueryDate();
 
         $credits = DB::table(env('SCHEMA_API_CREDIT'))
-            ->where('last_sync_date','>=', $queryDate)
+            ->whereRaw("STR_TO_DATE(REPLACE(REPLACE(last_sync_date, '/', '-'), '.', ':'), '%Y-%m-%d %H:%i:%s') >= ?", [$queryDate])
             ->where('business_id', env('BUSINESS_ID'))
             ->get()
             ->toArray();
