@@ -996,4 +996,32 @@ class SynchronizationController extends Controller
         $credits = $this->getDataTest();
         return json_decode($credits);
     }
+
+    /**
+     * Endpoint para consultar la lista de pagos de un crédito
+     */
+    public function getPaysList(Request $request)
+    {
+        $request->validate([
+            'sync_id' => 'required|string',
+            'date' => 'required|string'
+        ]);
+
+        $syncId = $request->input('sync_id');
+        $date = $request->input('date');
+
+        $payments = $this->getListPays($syncId, $date);
+
+        if ($payments === null) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se pudieron obtener los pagos'
+            ], 500);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $payments
+        ]);
+    }
 }
