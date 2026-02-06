@@ -766,6 +766,13 @@ class SynchronizationController extends Controller
             ->get()
             ->toArray();
 
+        // Obtener el campain_id activo para asociar los pagos
+        $campain_id = DB::table(env('SCHEMA_CAMPAINS'))
+            ->select('id')
+            ->where('business_id', env('BUSINESS_ID'))
+            ->where('status','ACTIVE')
+            ->first();
+
         if (empty($credits)) {
             Log::channel('credits')->warning("No se encontraron créditos para sincronizar pagos");
             return [
@@ -786,7 +793,7 @@ class SynchronizationController extends Controller
             'nro_syncs' => count($credits),
             'state'=>'IN-PROGRESS',
             'business_id' => env('BUSINESS_ID'),
-            'campain_id' => env('CAMPAIN_ID')
+            'campain_id' => $campain_id->id
         ]);
 
         try {
@@ -874,7 +881,7 @@ class SynchronizationController extends Controller
                         $paymentsMap[$key] = [
                             'credit_id' => $payment->credit_id ?? null,
                             'business_id' => env('BUSINESS_ID'),
-                            'campain_id' => env('CAMPAIN_ID'),
+                            'campain_id' => $campain_id->id ?? null,
                             'fee' => $payment->fee_id ?? null,
                             'payment_reference' => $payment->payment_id ?? null,
                             'payment_type' => $payment->payment_type ?? null,
@@ -947,7 +954,7 @@ class SynchronizationController extends Controller
                 ->where('sync_type', 'SYNC-PAYS')
                 ->where('state', 'IN-PROGRESS')
                 ->where('business_id', env('BUSINESS_ID'))
-                ->where('campain_id', env('CAMPAIN_ID'))
+                ->where('campain_id', $campain_id->id ?? null)
                 ->orderBy('created_at', 'desc')
                 ->limit(1)
                 ->update([
@@ -972,7 +979,7 @@ class SynchronizationController extends Controller
                 ->where('sync_type', 'SYNC-PAYS')
                 ->where('state', 'IN-PROGRESS')
                 ->where('business_id', env('BUSINESS_ID'))
-                ->where('campain_id', env('CAMPAIN_ID'))
+                ->where('campain_id', $campain_id->id ?? null)
                 ->orderBy('created_at', 'desc')
                 ->limit(1)
                 ->update([
