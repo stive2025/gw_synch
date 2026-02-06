@@ -770,7 +770,7 @@ class SynchronizationController extends Controller
         $campain_id = DB::table(env('SCHEMA_CAMPAINS'))
             ->select('id')
             ->where('business_id', env('BUSINESS_ID'))
-            ->where('status','ACTIVE')
+            ->where('state','ACTIVE')
             ->first();
 
         if (empty($credits)) {
