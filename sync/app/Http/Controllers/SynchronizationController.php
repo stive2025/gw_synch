@@ -767,7 +767,7 @@ class SynchronizationController extends Controller
             ->toArray();
 
         // Obtener el campain_id activo para asociar los pagos
-        $campain_id = DB::table(env('SCHEMA_CAMPAINS'))
+        $campain_id = DB::table(env('SCHEMA_API_CAMPAINS'))
             ->select('id')
             ->where('business_id', env('BUSINESS_ID'))
             ->where('state','ACTIVE')
