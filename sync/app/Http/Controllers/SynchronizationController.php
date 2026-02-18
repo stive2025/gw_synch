@@ -35,6 +35,10 @@ class SynchronizationController extends Controller
 
             $data = json_decode($response)->ListaCreditosSEFIL;
 
+            Log::channel('credits')->info("Respuesta de FACES_LIST_CREDITS procesada", [
+                'data' => $data
+            ]);
+        
             if ($data === null) {
                 Log::channel('credits')->warning("La respuesta de FACES_LIST_CREDITS es null o JSON inválido", [
                     'status' => $response->status()
@@ -137,7 +141,6 @@ class SynchronizationController extends Controller
         $contactErrors = 0;
 
         Log::channel('credits')->info("Iniciando sincronización de {$totalCredits} créditos");
-        // Log::channel('credits')->info(json_encode($credits));
 
         DB::table(env('SCHEMA_API_STATUS_SYNC'))->insert([
             'sync_type' => 'SYNC-CREDITS',
@@ -1029,6 +1032,32 @@ class SynchronizationController extends Controller
         return response()->json([
             'success' => true,
             'data' => $payments
+        ]);
+    }
+
+    /**
+     * Endpoint para consultar la lista de créditos por fecha
+     */
+    public function getCreditsList(Request $request)
+    {
+        $request->validate([
+            'date' => 'required|string'
+        ]);
+
+        $date = $request->input('date');
+
+        $credits = $this->getListCredits($date);
+
+        if ($credits === null) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se pudieron obtener los créditos'
+            ], 500);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $credits
         ]);
     }
 }
