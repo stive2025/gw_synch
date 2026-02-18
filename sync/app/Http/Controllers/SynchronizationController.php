@@ -1044,8 +1044,36 @@ class SynchronizationController extends Controller
             'date' => 'required|string'
         ]);
 
-        $date = $request->input('date');
-        $credits = $this->getListCredits($date);
-        return $credits;
+        $query_date = $request->input('date');
+
+        try {
+            $response = Http::post(env('FACES_LIST_CREDITS'), [
+                'credFechaConsulta' => $query_date
+            ]);
+
+            if ($response->failed()) {
+                Log::channel('credits')->error("Error en la petición HTTP a FACES_LIST_CREDITS", [
+                    'status' => $response->status()
+                ]);
+                return null;
+            }
+
+            $data = json_decode($response)->ListaCreditosSEFIL;
+
+            if ($data === null) {
+                Log::channel('credits')->warning("La respuesta de FACES_LIST_CREDITS es null o JSON inválido", [
+                    'status' => $response->status()
+                ]);
+                return null;
+            }
+
+            return $response->json();
+
+        } catch (\Exception $e) {
+            Log::channel('credits')->error("Excepción al obtener lista de créditos: " . $e->getMessage(), [
+                'query_date' => $query_date
+            ]);
+            return null;
+        }
     }
 }
