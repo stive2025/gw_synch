@@ -38,7 +38,7 @@ class SynchronizationController extends Controller
             Log::channel('credits')->info("Respuesta de FACES_LIST_CREDITS procesada", [
                 'data' => $data
             ]);
-        
+
             if ($data === null) {
                 Log::channel('credits')->warning("La respuesta de FACES_LIST_CREDITS es null o JSON inválido", [
                     'status' => $response->status()
@@ -1045,19 +1045,7 @@ class SynchronizationController extends Controller
         ]);
 
         $date = $request->input('date');
-
         $credits = $this->getListCredits($date);
-
-        if ($credits === null) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No se pudieron obtener los créditos'
-            ], 500);
-        }
-
-        return response()->json([
-            'success' => true,
-            'data' => $credits
-        ]);
+        return $credits;
     }
 }
