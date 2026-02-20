@@ -1067,4 +1067,37 @@ class SynchronizationController extends Controller
             return null;
         }
     }
+
+    /**
+     * Endpoint para consultar la lista de contactos de un crédito
+     */
+    public function getContactsList(Request $request)
+    {
+        $request->validate([
+            'sync_id' => 'required|string'
+        ]);
+
+        $sync_id = $request->input('sync_id');
+
+        try {
+            $response = Http::post(env('FACES_LIST_CONTACTS'), [
+                'credNumeroOperacion' => $sync_id
+            ]);
+
+            if ($response->failed()) {
+                Log::channel('credits')->error("Error en la petición HTTP a FACES_LIST_CONTACTS", [
+                    'status' => $response->status()
+                ]);
+                return null;
+            }
+
+            return $response->json();
+
+        } catch (\Exception $e) {
+            Log::channel('credits')->error("Excepción al obtener lista de contactos: " . $e->getMessage(), [
+                'sync_id' => $sync_id
+            ]);
+            return null;
+        }
+    }
 }
