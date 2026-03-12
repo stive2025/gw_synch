@@ -905,9 +905,11 @@ class SynchronizationController extends Controller
 
                 foreach ($paymentsToInsert as $payment) {
                     $existingPaymentsQuery->orWhere(function($query) use ($payment) {
-                        $query->where('payment_reference', $payment['payment_reference'])
+                        $query->where('credit_id', $payment['credit_id'])
+                            ->where('payment_reference', $payment['payment_reference'])
                             ->where('payment_value', $payment['payment_value'])
-                            ->where('payment_date', $payment['payment_date']);
+                            ->where('payment_date', $payment['payment_date'])
+                            ->where('fee', $payment['fee']);
                     });
                 }
 
@@ -915,9 +917,11 @@ class SynchronizationController extends Controller
                     ->get()
                     ->map(function($pay) {
                         return implode('|', [
+                            $pay->credit_id,
                             $pay->payment_reference,
                             $pay->payment_value,
-                            $pay->payment_date
+                            $pay->payment_date,
+                            $pay->fee
                         ]);
                     })
                     ->toArray();
@@ -926,9 +930,11 @@ class SynchronizationController extends Controller
                 $toInsert = [];
                 foreach ($paymentsToInsert as $payment) {
                     $key = implode('|', [
+                        $payment['credit_id'],
                         $payment['payment_reference'],
                         $payment['payment_value'],
-                        $payment['payment_date']
+                        $payment['payment_date'],
+                        $payment['fee']
                     ]);
 
                     if (!isset($existingPaymentsSet[$key])) {
@@ -999,6 +1005,175 @@ class SynchronizationController extends Controller
                 'errors' => $errors
             ];
         }
+    }
+
+    /**
+     * Sincronización de pagos sin transacciones y sin grabado de SCHEMA_API_STATUS_SYNC.
+     * Inserta en la BD conforme se procesan los pagos de cada crédito.
+     */
+    public function syncPaysAlt(Request $request)
+    {
+        Log::channel('credits')->info("Iniciando sincronización alternativa de pagos");
+
+        $currently_month = date('m');
+        $last_month = strval(intval($currently_month) - 1);
+        $currently_year = date('Y');
+
+        $queryDate = "{$currently_year}-" . str_pad($last_month, 2, '0', STR_PAD_LEFT) . "-01";
+        $currentlyQueryDate = $request->input('start_date') ?? $this::getQueryDate();
+
+        $credits = DB::table(env('SCHEMA_API_CREDIT'))
+            ->where('business_id', env('BUSINESS_ID'))
+            ->get()
+            ->toArray();
+
+        $campain_id = DB::table(env('SCHEMA_API_CAMPAINS'))
+            ->select('id')
+            ->where('business_id', env('BUSINESS_ID'))
+            ->where('state', 'ACTIVE')
+            ->first();
+
+        if (empty($credits)) {
+            Log::channel('credits')->warning("No se encontraron créditos para sincronizar pagos");
+            return [
+                'success' => false,
+                'message' => 'No se encontraron créditos para sincronizar pagos',
+                'payments_created' => 0
+            ];
+        }
+
+        $totalPaymentsCreated = 0;
+        $totalPaymentsSkipped = 0;
+        $errors = 0;
+        $now = now();
+
+        foreach ($credits as $credit) {
+            try {
+                $payments = $this->getListPays($credit->sync_id, $currentlyQueryDate);
+
+                if ($payments === null || !is_array($payments)) {
+                    Log::channel('credits')->warning("No payments returned for credit", [
+                        'sync_id' => $credit->sync_id
+                    ]);
+                    $errors++;
+                    continue;
+                }
+
+                $paymentsMap = [];
+
+                foreach ($payments as $payment) {
+                    $paymentDate = null;
+                    if (!empty($payment->payment_date)) {
+                        try {
+                            $date = \DateTime::createFromFormat('d/m/Y H:i:s', $payment->payment_date);
+                            if ($date) {
+                                $paymentDate = $date->format('Y-m-d H:i:s');
+                            } else {
+                                Log::channel('credits')->warning("Invalid payment_date format", [
+                                    'payment_date' => $payment->payment_date
+                                ]);
+                            }
+                        } catch (\Exception $e) {
+                            Log::channel('credits')->error("Error parsing payment_date", [
+                                'payment_date' => $payment->payment_date,
+                                'error' => $e->getMessage()
+                            ]);
+                        }
+                    }
+
+                    $key = implode('|', [
+                        $credit->id,
+                        $payment->fee_id ?? '',
+                        $payment->payment_id ?? '',
+                        $payment->payment_type ?? '',
+                        $payment->payment_value ?? '',
+                        $paymentDate ?? '',
+                        $payment->capital ?? '',
+                        $payment->interes ?? '',
+                        $payment->interes_mora ?? '',
+                        $payment->otros ?? ''
+                    ]);
+
+                    if (!isset($paymentsMap[$key])) {
+                        $paymentsMap[$key] = [
+                            'credit_id'         => $credit->id,
+                            'business_id'       => env('BUSINESS_ID'),
+                            'campain_id'        => $campain_id->id ?? null,
+                            'fee'               => $payment->fee_id ?? null,
+                            'payment_reference' => $payment->payment_id ?? null,
+                            'payment_type'      => $payment->payment_type ?? null,
+                            'payment_value'     => $payment->payment_value ?? null,
+                            'payment_date'      => $paymentDate,
+                            'capital'           => $payment->capital ?? null,
+                            'interest'          => $payment->interes ?? null,
+                            'mora'              => $payment->interes_mora ?? null,
+                            'other_values'      => $payment->otros ?? null,
+                            'created_at'        => $now,
+                            'updated_at'        => $now
+                        ];
+                    }
+                }
+
+                $paymentsToInsert = array_values($paymentsMap);
+
+                if (empty($paymentsToInsert)) {
+                    continue;
+                }
+
+                $existingPaymentsQuery = DB::table(env('SCHEMA_API_PAYS'));
+                foreach ($paymentsToInsert as $payment) {
+                    $existingPaymentsQuery->orWhere(function ($query) use ($payment) {
+                        $query->where('credit_id', $payment['credit_id'])
+                            ->where('payment_reference', $payment['payment_reference'])
+                            ->where('payment_value', $payment['payment_value'])
+                            ->where('payment_date', $payment['payment_date'])
+                            ->where('fee', $payment['fee']);
+                    });
+                }
+
+                $existingSet = array_flip(
+                    $existingPaymentsQuery->get()
+                        ->map(fn($p) => implode('|', [$p->credit_id, $p->payment_reference, $p->payment_value, $p->payment_date, $p->fee]))
+                        ->toArray()
+                );
+
+                $toInsert = [];
+                foreach ($paymentsToInsert as $payment) {
+                    $k = implode('|', [$payment['credit_id'], $payment['payment_reference'], $payment['payment_value'], $payment['payment_date'], $payment['fee']]);
+                    if (!isset($existingSet[$k])) {
+                        $toInsert[] = $payment;
+                    } else {
+                        $totalPaymentsSkipped++;
+                    }
+                }
+
+                if (!empty($toInsert)) {
+                    DB::table(env('SCHEMA_API_PAYS'))->insert($toInsert);
+                    $totalPaymentsCreated += count($toInsert);
+                    Log::channel('credits')->info("Inserted " . count($toInsert) . " payments for credit {$credit->sync_id}");
+                }
+
+            } catch (\Exception $e) {
+                Log::channel('credits')->error("Error procesando pagos del crédito", [
+                    'sync_id' => $credit->sync_id,
+                    'error'   => $e->getMessage()
+                ]);
+                $errors++;
+            }
+        }
+
+        Log::channel('credits')->info("Sincronización alternativa de pagos completada", [
+            'created' => $totalPaymentsCreated,
+            'skipped' => $totalPaymentsSkipped,
+            'errors'  => $errors
+        ]);
+
+        return [
+            'success'          => true,
+            'payments_created' => $totalPaymentsCreated,
+            'payments_skipped' => $totalPaymentsSkipped,
+            'errors'           => $errors
+        ];
     }
 
     //  Para testear sin conexión a FACES
