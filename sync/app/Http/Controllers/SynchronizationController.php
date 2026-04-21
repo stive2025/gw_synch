@@ -243,6 +243,24 @@ class SynchronizationController extends Controller
             Log::channel('credits')->info("-----------------------------------------------------------------------");
             DB::commit();
 
+            $today = date('Y-m-d', time() - 18000);
+
+            DB::table(env('SCHEMA_API_CREDIT'))
+                ->where('management_promise', '<', $today)
+                ->where('management_tray', 'GESTIONADO')
+                ->update(['management_tray' => 'EN PROCESO']);
+
+            DB::table(env('SCHEMA_API_CREDIT'))
+                ->whereNull('management_tray')
+                ->update([
+                    'management_tray' => 'PENDIENTE',
+                    'user_id' => 12
+                ]);
+
+            DB::table(env('SCHEMA_API_CREDIT'))
+                ->where('sync_status', 'INACTIVE')
+                ->update(['management_tray' => 'PENDIENTE']);
+
             DB::table(env('SCHEMA_API_STATUS_SYNC'))
                 ->where('sync_type', 'SYNC-CREDITS')
                 ->where('state', 'IN-PROGRESS')
