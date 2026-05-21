@@ -775,7 +775,7 @@ class SynchronizationController extends Controller
         Log::channel('credits')->info("Iniciando sincronización de pagos");
 
         $currently_month = date('m');
-        $last_month = strval(intval($currently_month) - 1);
+        $last_month = strval(intval($currently_month) - 3);
         $currently_year = date('Y');
         
         $queryDate = "{$currently_year}-" . str_pad($last_month, 2, '0', STR_PAD_LEFT) . "-01";
