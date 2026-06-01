@@ -152,10 +152,11 @@ class SynchronizationController extends Controller
             'campain_id' => env('CAMPAIN_ID')
         ]);
 
+        // FASE 1: Sincronización de créditos en transacción (solo operaciones DB, sin HTTP)
         try {
             DB::beginTransaction();
 
-            $inactive_credits = DB::table(env('SCHEMA_API_CREDIT'))
+            DB::table(env('SCHEMA_API_CREDIT'))
                 ->where('business_id', env('BUSINESS_ID'))
                 ->where('sync_status', 'ACTIVE')
                 ->update([
@@ -167,12 +168,12 @@ class SynchronizationController extends Controller
                 $syncIds = array_map(function($credit) {
                     return is_object($credit) ? $credit->sync_id : $credit['sync_id'];
                 }, $batch);
-                
+
                 $existingCredits = DB::table(env('SCHEMA_API_CREDIT'))
                     ->whereIn('sync_id', $syncIds)
                     ->pluck('sync_id')
                     ->toArray();
-                
+
                 $toUpdate = [];
                 $toInsert = [];
                 $now = now();
@@ -192,7 +193,6 @@ class SynchronizationController extends Controller
                         'award_date' => $creditData->award_date ?? null,
                         'due_date' => $creditData->due_date ?? null,
                         'frequency' => $creditData->frequency ?? '',
-                        // 'valor_org' => $creditData->valor_org ?? 0.0,
                         'capital' => $creditData->saldo_capital ?? 0.0,
                         'interest' => $creditData->interes ?? 0.0,
                         'mora' => $creditData->mora ?? 0.0,
@@ -204,7 +204,7 @@ class SynchronizationController extends Controller
                         'date_promise' => $creditData->compromiso ?? '',
                         'date_notification' => $creditData->notificacion ?? '',
                         'business_id' => env('BUSINESS_ID'),
-                        'last_sync_date' => date('Y/m/d H:i:s',time() - 18000),
+                        'last_sync_date' => date('Y/m/d H:i:s', time() - 18000),
                         'sync_status' => 'ACTIVE'
                     ];
 
@@ -230,71 +230,11 @@ class SynchronizationController extends Controller
                     $updated++;
                 }
 
-                $contactStats = $this->syncContactsForBatch($batch);
-                $contactsCreated += $contactStats['clients_created'];
-                $contactsUpdated += $contactStats['clients_updated'];
-                $phonesCreated += $contactStats['phones_created'];
-                $addressesCreated += $contactStats['addresses_created'];
-                $relationshipsCreated += $contactStats['relationships_created'];
-                $contactErrors += $contactStats['errors'];
-
                 Log::channel('credits')->info("Procesados {$created} creados, {$updated} actualizados de {$totalCredits}");
             }
 
             Log::channel('credits')->info("-----------------------------------------------------------------------");
             DB::commit();
-
-            $today = date('Y-m-d', time() - 18000);
-
-            DB::table(env('SCHEMA_API_CREDIT'))
-                ->where('management_promise', '<=', $today)
-                ->where('management_tray', 'GESTIONADO')
-                ->update(['management_tray' => 'EN PROCESO']);
-
-            DB::table(env('SCHEMA_API_CREDIT'))
-                ->where(function ($q) {
-                    $q->whereNull('management_tray')
-                      ->orWhere('management_tray', '');
-                })
-                ->update([
-                    'management_tray' => 'PENDIENTE',
-                    'user_id' => 12
-                ]);
-
-            DB::table(env('SCHEMA_API_CREDIT'))
-                ->where('sync_status', 'INACTIVE')
-                ->update(['management_tray' => 'PENDIENTE']);
-
-            DB::table(env('SCHEMA_API_STATUS_SYNC'))
-                ->where('sync_type', 'SYNC-CREDITS')
-                ->where('state', 'IN-PROGRESS')
-                ->where('business_id', env('BUSINESS_ID'))
-                ->where('campain_id', env('CAMPAIN_ID'))
-                ->orderBy('created_at', 'desc')
-                ->limit(1)
-                ->update([
-                    'state' => 'COMPLETED',
-                    'state_description' => 'Sincronización de créditos completada exitosamente',
-                    'updated_at' => now()
-                ]);
-
-            return [
-                'success' => true,
-                'credits' => [
-                    'created' => $created,
-                    'updated' => $updated,
-                    'total' => $totalCredits,
-                    'errors' => $errors
-                ],
-                'contacts' => [
-                    'clients_created' => $contactsCreated,
-                    'clients_updated' => $contactsUpdated,
-                    'phones_created' => $phonesCreated,
-                    'addresses_created' => $addressesCreated,
-                    'relationships_created' => $relationshipsCreated,
-                    'errors' => $contactErrors
-                ]
-            ];
 
         } catch (Exception $e) {
             DB::rollBack();
@@ -316,40 +256,121 @@ class SynchronizationController extends Controller
             return [
                 'success' => false,
                 'error' => $e->getMessage(),
-                'credits' => [
-                    'created' => $created,
-                    'updated' => $updated
-                ],
-                'contacts' => [
-                    'clients_created' => $contactsCreated,
-                    'clients_updated' => $contactsUpdated,
-                    'phones_created' => $phonesCreated,
-                    'addresses_created' => $addressesCreated,
-                    'relationships_created' => $relationshipsCreated,
-                    'errors' => $contactErrors
-                ]
+                'credits' => ['created' => $created, 'updated' => $updated]
             ];
         }
+
+        // FASE 2: Sincronización de contactos fuera de transacción (incluye HTTP calls)
+        // Reconectar para obtener una conexión fresca después de la transacción larga
+        DB::reconnect();
+
+        foreach (array_chunk($credits, $batchSize) as $batch) {
+            $contactStats = $this->syncContactsForBatch($batch);
+            $contactsCreated     += $contactStats['clients_created'];
+            $contactsUpdated     += $contactStats['clients_updated'];
+            $phonesCreated       += $contactStats['phones_created'];
+            $addressesCreated    += $contactStats['addresses_created'];
+            $relationshipsCreated += $contactStats['relationships_created'];
+            $contactErrors       += $contactStats['errors'];
+        }
+
+        // FASE 3: Ajustes de bandejas post-sync
+        $today = date('Y-m-d', time() - 18000);
+
+        DB::table(env('SCHEMA_API_CREDIT'))
+            ->where('management_promise', '<=', $today)
+            ->where('management_tray', 'GESTIONADO')
+            ->update(['management_tray' => 'EN PROCESO']);
+
+        DB::table(env('SCHEMA_API_CREDIT'))
+            ->where(function ($q) {
+                $q->whereNull('management_tray')
+                  ->orWhere('management_tray', '');
+            })
+            ->update([
+                'management_tray' => 'PENDIENTE',
+                'user_id' => 12
+            ]);
+
+        DB::table(env('SCHEMA_API_CREDIT'))
+            ->where('sync_status', 'INACTIVE')
+            ->update(['management_tray' => 'PENDIENTE']);
+
+        DB::table(env('SCHEMA_API_STATUS_SYNC'))
+            ->where('sync_type', 'SYNC-CREDITS')
+            ->where('state', 'IN-PROGRESS')
+            ->where('business_id', env('BUSINESS_ID'))
+            ->where('campain_id', env('CAMPAIN_ID'))
+            ->orderBy('created_at', 'desc')
+            ->limit(1)
+            ->update([
+                'state' => 'COMPLETED',
+                'state_description' => 'Sincronización de créditos completada exitosamente',
+                'updated_at' => now()
+            ]);
+
+        return [
+            'success' => true,
+            'credits' => [
+                'created' => $created,
+                'updated' => $updated,
+                'total'   => $totalCredits,
+                'errors'  => $errors
+            ],
+            'contacts' => [
+                'clients_created'      => $contactsCreated,
+                'clients_updated'      => $contactsUpdated,
+                'phones_created'       => $phonesCreated,
+                'addresses_created'    => $addressesCreated,
+                'relationships_created' => $relationshipsCreated,
+                'errors'               => $contactErrors
+            ]
+        ];
     }
     
     private function getCustomersBatch(array $identifications): array
     {
         if (empty($identifications)) return [];
+
+        $result = [];
+        // API acepta máximo 200 por llamada; castear a string para evitar mismatch de tipos
+        foreach (array_chunk(array_map('strval', array_values($identifications)), 200) as $chunk) {
+            try {
+                $response = Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+                    ->connectTimeout(5)
+                    ->timeout(15)
+                    ->post(env('SEFIL_CUSTOMERS_URL') . '/api/v1/customers/batch', [
+                        'identifications' => $chunk
+                    ]);
+                if ($response->failed()) {
+                    Log::channel('credits')->error("Error batch customers service", ['status' => $response->status()]);
+                    continue;
+                }
+                $result = array_merge(
+                    $result,
+                    collect($response->json() ?? [])->keyBy('identification')->toArray()
+                );
+            } catch (\Exception $e) {
+                Log::channel('credits')->error("Excepción batch customers: " . $e->getMessage());
+            }
+        }
+        return $result;
+    }
+
+    private function getCustomerFromService(string $identification): ?array
+    {
         try {
             $response = Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
                 ->connectTimeout(5)
-                ->timeout(15)
-                ->post(env('SEFIL_CUSTOMERS_URL') . '/api/v1/customers/batch', [
-                    'identifications' => array_values($identifications)
-                ]);
-            if ($response->failed()) {
-                Log::channel('credits')->error("Error batch customers service", ['status' => $response->status()]);
-                return [];
-            }
-            return collect($response->json() ?? [])->keyBy('identification')->toArray();
+                ->timeout(10)
+                ->get(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/full");
+            if ($response->failed()) return null;
+            return $response->json();
         } catch (\Exception $e) {
-            Log::channel('credits')->error("Excepción batch customers: " . $e->getMessage());
-            return [];
+            Log::channel('credits')->error("Excepción al obtener customer del servicio", [
+                'identification' => $identification, 'error' => $e->getMessage()
+            ]);
+            return null;
         }
     }
 
@@ -431,6 +452,12 @@ class SynchronizationController extends Controller
                     'civil_status'   => $facesContact->Estado_civil ?? null,
                     'profession'     => $facesContact->sector_economico ?? null,
                 ]);
+
+            if ($response->status() === 409) {
+                // Ya existe en el servicio pero el batch no lo retornó (mismatch de tipo en CI)
+                Log::channel('credits')->info("Customer already exists in service, fetching", ['identification' => $identification]);
+                return $this->getCustomerFromService($identification);
+            }
 
             if ($response->failed()) {
                 Log::channel('credits')->error("Error creating customer in service", [
