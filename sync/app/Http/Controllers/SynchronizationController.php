@@ -617,17 +617,12 @@ class SynchronizationController extends Controller
             'updated' => $stats['clients_updated']
         ]);
 
-        // FASE 4: Teléfonos — publicar en servicio los que vienen de FACES y no estén registrados;
-        //         poblar BD local con los del servicio (fuente autoritativa)
-        $phonesToInsert = [];
-
+        // FASE 4: Teléfonos — solo en el servicio centralizado (collection_contacts eliminada)
         foreach ($facesContactByCi as $ci => $facesContact) {
             $customer = $customersByCI[$ci] ?? null;
             if (!$clients->has($ci)) continue;
 
-            $clientId = $clients->get($ci)->id;
-
-            // Números ya registrados en el servicio de clientes
+            // Teléfonos ya registrados en el servicio
             $servicePhoneNumbers = collect($customer['phones'] ?? [])->pluck('phone_number')->toArray();
 
             // Publicar en el servicio los teléfonos de FACES que aún no estén registrados
@@ -635,6 +630,7 @@ class SynchronizationController extends Controller
                 foreach (array_filter(array_map('trim', explode(',', $facesContact->mobile_phones)), fn($p) => !empty($p)) as $phone) {
                     if (!in_array($phone, $servicePhoneNumbers)) {
                         $this->postPhoneToCustomerService($ci, $phone, 'MÓVIL');
+                        $stats['phones_created']++;
                     }
                 }
             }
@@ -642,157 +638,33 @@ class SynchronizationController extends Controller
                 foreach (array_filter(array_map('trim', explode(',', $facesContact->landline_phones)), fn($p) => !empty($p)) as $phone) {
                     if (!in_array($phone, $servicePhoneNumbers)) {
                         $this->postPhoneToCustomerService($ci, $phone, 'FIJO');
+                        $stats['phones_created']++;
                     }
                 }
-            }
-
-            // BD local: usar los teléfonos del servicio como fuente autoritativa
-            // El servicio retorna "MOVIL"; la BD local usa "MÓVIL"
-            foreach ($customer['phones'] ?? [] as $phone) {
-                $phoneNumber = $phone['phone_number'] ?? null;
-                if (empty($phoneNumber)) continue;
-                $rawType = $phone['phone_type'] ?? 'MOVIL';
-                $localType = strtoupper($rawType) === 'MOVIL' ? 'MÓVIL' : $rawType;
-                $phonesToInsert[] = [
-                    'client_id' => $clientId,
-                    'phone_status' => 'ACTIVE',
-                    'phone_number' => $phoneNumber,
-                    'phone_type' => $localType,
-                    'created_at' => $now,
-                    'updated_at' => $now
-                ];
-            }
-        }
-
-        if (!empty($phonesToInsert)) {
-            $clientIds = array_unique(array_column($phonesToInsert, 'client_id'));
-            $existingPhones = DB::table(env('SCHEMA_API_CONTACT'))
-                ->whereIn('client_id', $clientIds)
-                ->get()
-                ->map(fn($p) => $p->client_id . '|' . $p->phone_number)
-                ->toArray();
-            $existingPhonesSet = array_flip($existingPhones);
-
-            $newPhones = array_filter($phonesToInsert, fn($p) => !isset($existingPhonesSet[$p['client_id'] . '|' . $p['phone_number']]));
-
-            if (!empty($newPhones)) {
-                DB::table(env('SCHEMA_API_CONTACT'))->insert(array_values($newPhones));
-                $stats['phones_created'] = count($newPhones);
             }
         }
 
         Log::channel('credits')->info("Phones processed", ['created' => $stats['phones_created']]);
 
-        // FASE 5: Direcciones — publicar en servicio las que vienen de FACES y no estén registradas;
-        //         poblar BD local con las del servicio (fuente autoritativa)
-        $addressesToProcess = [];
-
+        // FASE 5: Direcciones — solo en el servicio centralizado (collection_directions eliminada)
         foreach ($facesContactByCi as $ci => $facesContact) {
             $customer = $customersByCI[$ci] ?? null;
             if (!$clients->has($ci)) continue;
 
-            $clientId = $clients->get($ci)->id;
-
-            // Tipos de dirección ya registrados en el servicio de clientes
+            // Tipos de dirección ya registrados en el servicio
             $serviceAddressTypes = collect($customer['addresses'] ?? [])->pluck('address_type')->toArray();
 
-            // Publicar en el servicio las direcciones de FACES que aún no estén registradas
             if (!empty($facesContact->direccion_domicilio) && is_object($facesContact->direccion_domicilio)) {
                 if (!in_array('DOMICILIO', $serviceAddressTypes)) {
                     $this->postAddressToCustomerService($ci, $facesContact->direccion_domicilio, 'DOMICILIO');
+                    $stats['addresses_created']++;
                 }
             }
             if (!empty($facesContact->direccion_trabajo) && is_object($facesContact->direccion_trabajo)) {
                 if (!in_array('TRABAJO', $serviceAddressTypes)) {
                     $this->postAddressToCustomerService($ci, $facesContact->direccion_trabajo, 'TRABAJO');
+                    $stats['addresses_created']++;
                 }
-            }
-
-            // BD local: usar las direcciones del servicio como fuente autoritativa
-            foreach ($customer['addresses'] ?? [] as $addr) {
-                $addressesToProcess[] = [
-                    'client_id' => $clientId,
-                    'type' => $addr['address_type'] ?? 'DOMICILIO',
-                    'address' => $addr['address_line'] ?? null,
-                    'province' => $addr['province'] ?? null,
-                    'canton' => $addr['canton'] ?? null,
-                    'parish' => $addr['parish'] ?? null,
-                    'neighborhood' => $addr['neighborhood'] ?? null,
-                    'latitude' => $addr['latitude'] ?? null,
-                    'longitude' => $addr['longitude'] ?? null,
-                    'created_at' => $now,
-                    'updated_at' => $now
-                ];
-            }
-        }
-
-        if (!empty($addressesToProcess)) {
-            $clientIds = array_unique(array_column($addressesToProcess, 'client_id'));
-            $existingAddresses = DB::table(env('SCHEMA_API_DIRECTION'))
-                ->whereIn('client_id', $clientIds)
-                ->get()
-                ->keyBy(fn($a) => $a->client_id . '|' . $a->type);
-
-            $toInsert = [];
-            $toUpdate = [];
-
-            foreach ($addressesToProcess as $addr) {
-                $key = $addr['client_id'] . '|' . $addr['type'];
-
-                if ($existingAddresses->has($key)) {
-                    $existing = $existingAddresses->get($key);
-                    $hasChanges = (
-                        $existing->address !== $addr['address'] ||
-                        $existing->province !== $addr['province'] ||
-                        $existing->canton !== $addr['canton'] ||
-                        $existing->parish !== $addr['parish'] ||
-                        $existing->neighborhood !== $addr['neighborhood'] ||
-                        $existing->latitude !== $addr['latitude'] ||
-                        $existing->longitude !== $addr['longitude']
-                    );
-
-                    if ($hasChanges) {
-                        $toUpdate[] = [
-                            'client_id' => $addr['client_id'],
-                            'type' => $addr['type'],
-                            'address' => $addr['address'],
-                            'province' => $addr['province'],
-                            'canton' => $addr['canton'],
-                            'parish' => $addr['parish'],
-                            'neighborhood' => $addr['neighborhood'],
-                            'latitude' => $addr['latitude'],
-                            'longitude' => $addr['longitude'],
-                            'updated_at' => $now
-                        ];
-                    }
-                } else {
-                    $toInsert[] = $addr;
-                }
-            }
-
-            if (!empty($toInsert)) {
-                DB::table(env('SCHEMA_API_DIRECTION'))->insert($toInsert);
-                $stats['addresses_created'] = count($toInsert);
-            }
-
-            foreach ($toUpdate as $updateData) {
-                DB::table(env('SCHEMA_API_DIRECTION'))
-                    ->where('client_id', $updateData['client_id'])
-                    ->where('type', $updateData['type'])
-                    ->update([
-                        'address' => $updateData['address'],
-                        'province' => $updateData['province'],
-                        'canton' => $updateData['canton'],
-                        'parish' => $updateData['parish'],
-                        'neighborhood' => $updateData['neighborhood'],
-                        'latitude' => $updateData['latitude'],
-                        'longitude' => $updateData['longitude'],
-                        'updated_at' => $updateData['updated_at']
-                    ]);
-            }
-
-            if (!empty($toUpdate)) {
-                Log::channel('credits')->info("Updated " . count($toUpdate) . " addresses with new data");
             }
         }
 
