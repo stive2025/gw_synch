@@ -246,12 +246,15 @@ class SynchronizationController extends Controller
             $today = date('Y-m-d', time() - 18000);
 
             DB::table(env('SCHEMA_API_CREDIT'))
-                ->where('management_promise', '<', $today)
+                ->where('management_promise', '<=', $today)
                 ->where('management_tray', 'GESTIONADO')
                 ->update(['management_tray' => 'EN PROCESO']);
 
             DB::table(env('SCHEMA_API_CREDIT'))
-                ->whereNull('management_tray')
+                ->where(function ($q) {
+                    $q->whereNull('management_tray')
+                      ->orWhere('management_tray', '');
+                })
                 ->update([
                     'management_tray' => 'PENDIENTE',
                     'user_id' => 12
@@ -328,6 +331,66 @@ class SynchronizationController extends Controller
         }
     }
     
+    private function getCustomersBatch(array $identifications): array
+    {
+        if (empty($identifications)) return [];
+        try {
+            $response = Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+                ->post(env('SEFIL_CUSTOMERS_URL') . '/api/v1/customers/batch', [
+                    'identifications' => array_values($identifications)
+                ]);
+            if ($response->failed()) {
+                Log::channel('credits')->error("Error batch customers service", ['status' => $response->status()]);
+                return [];
+            }
+            return collect($response->json() ?? [])->keyBy('identification')->toArray();
+        } catch (\Exception $e) {
+            Log::channel('credits')->error("Excepción batch customers: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    private function postPhoneToCustomerService(string $identification, string $phoneNumber, string $phoneType): void
+    {
+        try {
+            Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+                ->post(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/phones", [
+                    'phone_number' => $phoneNumber,
+                    'phone_type' => $phoneType,
+                    'created_by' => 'FACES',
+                    'created_source' => 'Collecta'
+                ]);
+        } catch (\Exception $e) {
+            Log::channel('credits')->error("Error posting phone to customer service", [
+                'identification' => $identification, 'error' => $e->getMessage()
+            ]);
+        }
+    }
+
+    private function postAddressToCustomerService(string $identification, object $addr, string $addressType): void
+    {
+        try {
+            Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+                ->post(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/addresses", [
+                    'address_line' => $addr->address ?? null,
+                    'province' => $addr->province ?? null,
+                    'city' => $addr->canton ?? null,
+                    'canton' => $addr->canton ?? null,
+                    'parish' => $addr->parroquia ?? null,
+                    'neighborhood' => $addr->neighborhood ?? null,
+                    'address_type' => $addressType,
+                    'latitude' => $addr->latitude ?? null,
+                    'longitude' => $addr->length ?? null,
+                    'created_by' => 'FACES',
+                    'created_source' => 'Collecta'
+                ]);
+        } catch (\Exception $e) {
+            Log::channel('credits')->error("Error posting address to customer service", [
+                'identification' => $identification, 'error' => $e->getMessage()
+            ]);
+        }
+    }
+
     private function syncContactsForBatch(array $batch)
     {
         $stats = [
@@ -339,6 +402,7 @@ class SynchronizationController extends Controller
             'errors' => 0
         ];
 
+        // FASE 1: Obtener contactos por crédito desde FACES (CI + tipo + datos de respaldo)
         $allContacts = [];
         foreach ($batch as $creditData) {
             try {
@@ -356,14 +420,12 @@ class SynchronizationController extends Controller
                     $contact->credit_sync_id = $creditData->sync_id;
                     $allContacts[] = $contact;
                 }
-
             } catch (\Exception $e) {
                 Log::channel('credits')->error("Error fetching contacts for credit", [
                     'sync_id' => $creditData->sync_id,
                     'error' => $e->getMessage()
                 ]);
                 $stats['errors']++;
-                continue;
             }
         }
 
@@ -372,40 +434,49 @@ class SynchronizationController extends Controller
             return $stats;
         }
 
-        Log::channel('credits')->info("Processing " . count($allContacts) . " contacts for batch");
-
-        $clientsByCi = [];
+        // FASE 2: Recopilar CIs únicos y obtener datos completos del servicio de clientes
+        $facesContactByCi = [];
         foreach ($allContacts as $contact) {
             $ci = $contact->documento ?? null;
-
-            if (empty($ci)) {
-                Log::channel('credits')->warning("Contact without CI, skipping", [
-                    'sync_client_id' => $contact->sync_client_id ?? 'unknown'
-                ]);
-                continue;
-            }
-
-            if (!isset($clientsByCi[$ci])) {
-                $clientsByCi[$ci] = $contact;
+            if (!empty($ci) && !isset($facesContactByCi[$ci])) {
+                $facesContactByCi[$ci] = $contact;
             }
         }
 
+        $uniqueCIs = array_keys($facesContactByCi);
+        $customersByCI = $this->getCustomersBatch($uniqueCIs);
+
+        Log::channel('credits')->info("Processing " . count($allContacts) . " contacts for batch");
+
+        $now = now();
+
+        // FASE 3: Upsert de clientes en BD local usando datos del servicio de clientes
         $existingClients = DB::table(env('SCHEMA_API_CLIENT'))
-            ->whereIn('ci', array_keys($clientsByCi))
+            ->whereIn('ci', $uniqueCIs)
             ->get()
             ->keyBy('ci');
 
         $clientsToInsert = [];
         $clientsToUpdate = [];
-        $now = now();
 
-        foreach ($clientsByCi as $ci => $contact) {
+        foreach ($facesContactByCi as $ci => $facesContact) {
+            $customer = $customersByCI[$ci] ?? null;
+
+            if (empty($customer)) {
+                Log::channel('credits')->warning("Customer not found in service, skipping", ['ci' => $ci]);
+                continue;
+            }
+
+            $name = !empty($customer['full_name'])
+                ? $customer['full_name']
+                : trim(($customer['first_name'] ?? '') . ' ' . ($customer['last_name'] ?? ''));
+
             $clientData = [
-                'name' => $contact->fullName ?? '',
+                'name' => $name,
                 'ci' => $ci,
-                'gender' => $contact->Sexo ?? null,
-                'civil_status' => $contact->Estado_civil ?? null,
-                'economic_activity' => $contact->sector_economico ?? null,
+                'gender' => $customer['gender'] ?? null,
+                'civil_status' => $customer['civil_status'] ?? null,
+                'economic_activity' => $customer['financial_information']['economic_activity'] ?? null,
             ];
 
             if ($existingClients->has($ci)) {
@@ -431,7 +502,7 @@ class SynchronizationController extends Controller
         }
 
         $clients = DB::table(env('SCHEMA_API_CLIENT'))
-            ->whereIn('ci', array_keys($clientsByCi))
+            ->whereIn('ci', $uniqueCIs)
             ->get()
             ->keyBy('ci');
 
@@ -440,50 +511,47 @@ class SynchronizationController extends Controller
             'updated' => $stats['clients_updated']
         ]);
 
+        // FASE 4: Teléfonos — publicar en servicio los que vienen de FACES y no estén registrados;
+        //         poblar BD local con los del servicio (fuente autoritativa)
         $phonesToInsert = [];
 
-        foreach ($allContacts as $contact) {
-            $ci = $contact->documento ?? null;
-            if (empty($ci) || !$clients->has($ci)) {
-                continue;
-            }
+        foreach ($facesContactByCi as $ci => $facesContact) {
+            $customer = $customersByCI[$ci] ?? null;
+            if (!$clients->has($ci)) continue;
 
             $clientId = $clients->get($ci)->id;
 
-            if (!empty($contact->mobile_phones)) {
-                $mobilePhones = array_filter(
-                    array_map('trim', explode(',', $contact->mobile_phones)),
-                    function($phone) { return !empty($phone); }
-                );
+            // Números ya registrados en el servicio de clientes
+            $servicePhoneNumbers = collect($customer['phones'] ?? [])->pluck('phone_number')->toArray();
 
-                foreach ($mobilePhones as $phone) {
-                    $phonesToInsert[] = [
-                        'client_id' => $clientId,
-                        'phone_status'=>'ACTIVE',
-                        'phone_number' => $phone,
-                        'phone_type' => 'MÓVIL',
-                        'created_at' => $now,
-                        'updated_at' => $now
-                    ];
+            // Publicar en el servicio los teléfonos de FACES que aún no estén registrados
+            if (!empty($facesContact->mobile_phones)) {
+                foreach (array_filter(array_map('trim', explode(',', $facesContact->mobile_phones)), fn($p) => !empty($p)) as $phone) {
+                    if (!in_array($phone, $servicePhoneNumbers)) {
+                        $this->postPhoneToCustomerService($ci, $phone, 'MÓVIL');
+                    }
+                }
+            }
+            if (!empty($facesContact->landline_phones)) {
+                foreach (array_filter(array_map('trim', explode(',', $facesContact->landline_phones)), fn($p) => !empty($p)) as $phone) {
+                    if (!in_array($phone, $servicePhoneNumbers)) {
+                        $this->postPhoneToCustomerService($ci, $phone, 'FIJO');
+                    }
                 }
             }
 
-            if (!empty($contact->landline_phones)) {
-                $landlinePhones = array_filter(
-                    array_map('trim', explode(',', $contact->landline_phones)),
-                    function($phone) { return !empty($phone); }
-                );
-
-                foreach ($landlinePhones as $phone) {
-                    $phonesToInsert[] = [
-                        'client_id' => $clientId,
-                        'phone_status'=>'ACTIVE',
-                        'phone_number' => $phone,
-                        'phone_type' => 'FIJO',
-                        'created_at' => $now,
-                        'updated_at' => $now
-                    ];
-                }
+            // BD local: usar los teléfonos del servicio como fuente autoritativa
+            foreach ($customer['phones'] ?? [] as $phone) {
+                $phoneNumber = $phone['phone_number'] ?? null;
+                if (empty($phoneNumber)) continue;
+                $phonesToInsert[] = [
+                    'client_id' => $clientId,
+                    'phone_status' => 'ACTIVE',
+                    'phone_number' => $phoneNumber,
+                    'phone_type' => $phone['phone_type'] ?? 'MÓVIL',
+                    'created_at' => $now,
+                    'updated_at' => $now
+                ];
             }
         }
 
@@ -492,92 +560,78 @@ class SynchronizationController extends Controller
             $existingPhones = DB::table(env('SCHEMA_API_CONTACT'))
                 ->whereIn('client_id', $clientIds)
                 ->get()
-                ->map(function($phone) {
-                    return $phone->client_id . '|' . $phone->phone_number;
-                })
+                ->map(fn($p) => $p->client_id . '|' . $p->phone_number)
                 ->toArray();
-
             $existingPhonesSet = array_flip($existingPhones);
-            
-            $phonesToInsert = array_filter($phonesToInsert, function($phone) use ($existingPhonesSet) {
-                $key = $phone['client_id'] . '|' . $phone['phone_number'];
-                return !isset($existingPhonesSet[$key]);
-            });
 
-            if (!empty($phonesToInsert)) {
-                DB::table(env('SCHEMA_API_CONTACT'))->insert($phonesToInsert);
-                $stats['phones_created'] = count($phonesToInsert);
+            $newPhones = array_filter($phonesToInsert, fn($p) => !isset($existingPhonesSet[$p['client_id'] . '|' . $p['phone_number']]));
+
+            if (!empty($newPhones)) {
+                DB::table(env('SCHEMA_API_CONTACT'))->insert(array_values($newPhones));
+                $stats['phones_created'] = count($newPhones);
             }
         }
 
-        Log::channel('credits')->info("Phones processed", [
-            'created' => $stats['phones_created']
-        ]);
+        Log::channel('credits')->info("Phones processed", ['created' => $stats['phones_created']]);
 
-        $addressesToInsert = [];
+        // FASE 5: Direcciones — publicar en servicio las que vienen de FACES y no estén registradas;
+        //         poblar BD local con las del servicio (fuente autoritativa)
+        $addressesToProcess = [];
 
-        foreach ($allContacts as $contact) {
-            $ci = $contact->documento ?? null;
-            if (empty($ci) || !$clients->has($ci)) {
-                continue;
-            }
+        foreach ($facesContactByCi as $ci => $facesContact) {
+            $customer = $customersByCI[$ci] ?? null;
+            if (!$clients->has($ci)) continue;
 
             $clientId = $clients->get($ci)->id;
 
-            if (!empty($contact->direccion_domicilio) && is_object($contact->direccion_domicilio)) {
-                $addr = $contact->direccion_domicilio;
-                $addressesToInsert[] = [
-                    'client_id' => $clientId,
-                    'type' => 'DOMICILIO',
-                    'address' => $addr->address ?? null,
-                    'province' => $addr->province ?? null,
-                    'canton' => $addr->canton ?? null,
-                    'parish' => $addr->parroquia ?? null,
-                    'neighborhood' => $addr->neighborhood ?? null,
-                    'latitude' => $addr->latitude ?? null,
-                    'longitude' => $addr->length ?? null,
-                    'created_at' => $now,
-                    'updated_at' => $now
-                ];
+            // Tipos de dirección ya registrados en el servicio de clientes
+            $serviceAddressTypes = collect($customer['addresses'] ?? [])->pluck('address_type')->toArray();
+
+            // Publicar en el servicio las direcciones de FACES que aún no estén registradas
+            if (!empty($facesContact->direccion_domicilio) && is_object($facesContact->direccion_domicilio)) {
+                if (!in_array('DOMICILIO', $serviceAddressTypes)) {
+                    $this->postAddressToCustomerService($ci, $facesContact->direccion_domicilio, 'DOMICILIO');
+                }
+            }
+            if (!empty($facesContact->direccion_trabajo) && is_object($facesContact->direccion_trabajo)) {
+                if (!in_array('TRABAJO', $serviceAddressTypes)) {
+                    $this->postAddressToCustomerService($ci, $facesContact->direccion_trabajo, 'TRABAJO');
+                }
             }
 
-            if (!empty($contact->direccion_trabajo) && is_object($contact->direccion_trabajo)) {
-                $addr = $contact->direccion_trabajo;
-                $addressesToInsert[] = [
+            // BD local: usar las direcciones del servicio como fuente autoritativa
+            foreach ($customer['addresses'] ?? [] as $addr) {
+                $addressesToProcess[] = [
                     'client_id' => $clientId,
-                    'type' => 'TRABAJO',
-                    'address' => $addr->address ?? null,
-                    'province' => $addr->province ?? null,
-                    'canton' => $addr->canton ?? null,
-                    'parish' => $addr->parroquia ?? null,
-                    'neighborhood' => $addr->neighborhood ?? null,
-                    'latitude' => $addr->latitude ?? null,
-                    'longitude' => $addr->length ?? null,
+                    'type' => $addr['address_type'] ?? 'DOMICILIO',
+                    'address' => $addr['address_line'] ?? null,
+                    'province' => $addr['province'] ?? null,
+                    'canton' => $addr['canton'] ?? null,
+                    'parish' => $addr['parish'] ?? null,
+                    'neighborhood' => $addr['neighborhood'] ?? null,
+                    'latitude' => $addr['latitude'] ?? null,
+                    'longitude' => $addr['longitude'] ?? null,
                     'created_at' => $now,
                     'updated_at' => $now
                 ];
             }
         }
 
-        if (!empty($addressesToInsert)) {
-            $clientIds = array_unique(array_column($addressesToInsert, 'client_id'));
+        if (!empty($addressesToProcess)) {
+            $clientIds = array_unique(array_column($addressesToProcess, 'client_id'));
             $existingAddresses = DB::table(env('SCHEMA_API_DIRECTION'))
                 ->whereIn('client_id', $clientIds)
                 ->get()
-                ->keyBy(function($addr) {
-                    return $addr->client_id . '|' . $addr->type;
-                });
+                ->keyBy(fn($a) => $a->client_id . '|' . $a->type);
 
             $toInsert = [];
             $toUpdate = [];
 
-            foreach ($addressesToInsert as $addr) {
+            foreach ($addressesToProcess as $addr) {
                 $key = $addr['client_id'] . '|' . $addr['type'];
 
                 if ($existingAddresses->has($key)) {
-                    // Existe, verificar si los datos son diferentes
                     $existing = $existingAddresses->get($key);
-
                     $hasChanges = (
                         $existing->address !== $addr['address'] ||
                         $existing->province !== $addr['province'] ||
@@ -589,7 +643,6 @@ class SynchronizationController extends Controller
                     );
 
                     if ($hasChanges) {
-                        // Solo actualizar si hay cambios
                         $toUpdate[] = [
                             'client_id' => $addr['client_id'],
                             'type' => $addr['type'],
@@ -603,20 +656,16 @@ class SynchronizationController extends Controller
                             'updated_at' => $now
                         ];
                     }
-                    // Si no hay cambios, skip (no hacer nada)
                 } else {
-                    // No existe, insertar
                     $toInsert[] = $addr;
                 }
             }
 
-            // Bulk insert de direcciones nuevas
             if (!empty($toInsert)) {
                 DB::table(env('SCHEMA_API_DIRECTION'))->insert($toInsert);
                 $stats['addresses_created'] = count($toInsert);
             }
 
-            // Update de direcciones con datos diferentes
             foreach ($toUpdate as $updateData) {
                 DB::table(env('SCHEMA_API_DIRECTION'))
                     ->where('client_id', $updateData['client_id'])
@@ -638,16 +687,12 @@ class SynchronizationController extends Controller
             }
         }
 
-        Log::channel('credits')->info("Addresses processed", [
-            'created' => $stats['addresses_created']
-        ]);
+        Log::channel('credits')->info("Addresses processed", ['created' => $stats['addresses_created']]);
 
-        // FASE 5: Relaciones Client-Credit
-        $relationshipsMap = []; // Usar map para evitar duplicados
+        // FASE 6: Relaciones Client-Credit
+        $relationshipsMap = [];
 
-        $creditSyncIds = array_unique(array_map(function($contact) {
-            return $contact->credit_sync_id;
-        }, $allContacts));
+        $creditSyncIds = array_unique(array_map(fn($c) => $c->credit_sync_id, $allContacts));
 
         $creditsBySyncId = DB::table(env('SCHEMA_API_CREDIT'))
             ->whereIn('sync_id', $creditSyncIds)
@@ -658,14 +703,11 @@ class SynchronizationController extends Controller
             $ci = $contact->documento ?? null;
             $creditSyncId = $contact->credit_sync_id ?? null;
 
-            if (empty($ci) || empty($creditSyncId)) {
-                continue;
-            }
+            if (empty($ci) || empty($creditSyncId)) continue;
 
             if (!$clients->has($ci)) {
                 Log::channel('credits')->warning("Client not found for relationship", [
-                    'ci' => $ci,
-                    'credit_sync_id' => $creditSyncId
+                    'ci' => $ci, 'credit_sync_id' => $creditSyncId
                 ]);
                 continue;
             }
@@ -680,11 +722,8 @@ class SynchronizationController extends Controller
             $clientId = $clients->get($ci)->id;
             $creditId = $creditsBySyncId->get($creditSyncId)->id;
             $type = $contact->type ?? 'TITULAR';
-
-            // Usar clave única para evitar duplicados en el array
             $key = $clientId . '|' . $creditId;
 
-            // Solo agregar si no existe o actualizar el type (el último prevalece)
             if (!isset($relationshipsMap[$key])) {
                 $relationshipsMap[$key] = [
                     'client_id' => $clientId,
@@ -694,7 +733,6 @@ class SynchronizationController extends Controller
                     'updated_at' => $now
                 ];
             } else {
-                // Si ya existe en el array, actualizar el type (último prevalece)
                 $relationshipsMap[$key]['type'] = $type;
                 $relationshipsMap[$key]['updated_at'] = $now;
             }
@@ -706,14 +744,11 @@ class SynchronizationController extends Controller
             $clientIds = array_unique(array_column($relationshipsToInsert, 'client_id'));
             $creditIds = array_unique(array_column($relationshipsToInsert, 'credit_id'));
 
-            // Obtener relaciones existentes (constraint unique en client_id + credit_id)
             $existingRelationships = DB::table('client_credit')
                 ->whereIn('client_id', $clientIds)
                 ->whereIn('credit_id', $creditIds)
                 ->get()
-                ->keyBy(function($rel) {
-                    return $rel->client_id . '|' . $rel->credit_id;
-                });
+                ->keyBy(fn($rel) => $rel->client_id . '|' . $rel->credit_id);
 
             $toInsert = [];
             $toUpdate = [];
@@ -722,7 +757,6 @@ class SynchronizationController extends Controller
                 $key = $rel['client_id'] . '|' . $rel['credit_id'];
 
                 if ($existingRelationships->has($key)) {
-                    // Si existe, actualizar el type si es diferente
                     $existing = $existingRelationships->get($key);
                     if ($existing->type !== $rel['type']) {
                         $toUpdate[] = [
@@ -733,18 +767,15 @@ class SynchronizationController extends Controller
                         ];
                     }
                 } else {
-                    // Si no existe, insertar
                     $toInsert[] = $rel;
                 }
             }
 
-            // Bulk insert de nuevas relaciones
             if (!empty($toInsert)) {
                 DB::table('client_credit')->insert($toInsert);
                 $stats['relationships_created'] = count($toInsert);
             }
 
-            // Update de relaciones existentes con type diferente
             foreach ($toUpdate as $updateData) {
                 DB::table('client_credit')
                     ->where('client_id', $updateData['client_id'])
