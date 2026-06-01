@@ -686,13 +686,6 @@ class SynchronizationController extends Controller
 
             if (empty($ci) || empty($creditSyncId)) continue;
 
-            if (!$clients->has($ci)) {
-                Log::channel('credits')->warning("Client not found for relationship", [
-                    'ci' => $ci, 'credit_sync_id' => $creditSyncId
-                ]);
-                continue;
-            }
-
             if (!$creditsBySyncId->has($creditSyncId)) {
                 Log::channel('credits')->warning("Credit not found for relationship", [
                     'credit_sync_id' => $creditSyncId
@@ -700,21 +693,20 @@ class SynchronizationController extends Controller
                 continue;
             }
 
-            $clientId = $clients->get($ci)->id;
             $creditId = $creditsBySyncId->get($creditSyncId)->id;
             $type = $contact->type ?? 'TITULAR';
-            $key = $clientId . '|' . $creditId;
+            $key = $ci . '|' . $creditId;
 
             if (!isset($relationshipsMap[$key])) {
                 $relationshipsMap[$key] = [
-                    'client_id' => $clientId,
-                    'credit_id' => $creditId,
-                    'type' => $type,
-                    'created_at' => $now,
-                    'updated_at' => $now
+                    'identification' => (string) $ci,
+                    'credit_id'      => $creditId,
+                    'type'           => $type,
+                    'created_at'     => $now,
+                    'updated_at'     => $now
                 ];
             } else {
-                $relationshipsMap[$key]['type'] = $type;
+                $relationshipsMap[$key]['type']       = $type;
                 $relationshipsMap[$key]['updated_at'] = $now;
             }
         }
@@ -722,29 +714,29 @@ class SynchronizationController extends Controller
         $relationshipsToInsert = array_values($relationshipsMap);
 
         if (!empty($relationshipsToInsert)) {
-            $clientIds = array_unique(array_column($relationshipsToInsert, 'client_id'));
-            $creditIds = array_unique(array_column($relationshipsToInsert, 'credit_id'));
+            $identifications = array_unique(array_column($relationshipsToInsert, 'identification'));
+            $creditIds       = array_unique(array_column($relationshipsToInsert, 'credit_id'));
 
             $existingRelationships = DB::table('client_credit')
-                ->whereIn('client_id', $clientIds)
+                ->whereIn('identification', $identifications)
                 ->whereIn('credit_id', $creditIds)
                 ->get()
-                ->keyBy(fn($rel) => $rel->client_id . '|' . $rel->credit_id);
+                ->keyBy(fn($rel) => $rel->identification . '|' . $rel->credit_id);
 
             $toInsert = [];
             $toUpdate = [];
 
             foreach ($relationshipsToInsert as $rel) {
-                $key = $rel['client_id'] . '|' . $rel['credit_id'];
+                $key = $rel['identification'] . '|' . $rel['credit_id'];
 
                 if ($existingRelationships->has($key)) {
                     $existing = $existingRelationships->get($key);
                     if ($existing->type !== $rel['type']) {
                         $toUpdate[] = [
-                            'client_id' => $rel['client_id'],
-                            'credit_id' => $rel['credit_id'],
-                            'type' => $rel['type'],
-                            'updated_at' => $now
+                            'identification' => $rel['identification'],
+                            'credit_id'      => $rel['credit_id'],
+                            'type'           => $rel['type'],
+                            'updated_at'     => $now
                         ];
                     }
                 } else {
@@ -759,10 +751,10 @@ class SynchronizationController extends Controller
 
             foreach ($toUpdate as $updateData) {
                 DB::table('client_credit')
-                    ->where('client_id', $updateData['client_id'])
+                    ->where('identification', $updateData['identification'])
                     ->where('credit_id', $updateData['credit_id'])
                     ->update([
-                        'type' => $updateData['type'],
+                        'type'       => $updateData['type'],
                         'updated_at' => $updateData['updated_at']
                     ]);
             }
