@@ -401,6 +401,58 @@ class SynchronizationController extends Controller
         }
     }
 
+    private function createCustomerInService(string $identification, object $facesContact): ?array
+    {
+        $fullName = trim($facesContact->fullName ?? '');
+        $parts = preg_split('/\s+/', $fullName, -1, PREG_SPLIT_NO_EMPTY);
+
+        // Formato ecuatoriano: APELLIDO1 APELLIDO2 NOMBRE1 NOMBRE2...
+        if (count($parts) >= 3) {
+            $lastName  = implode(' ', array_slice($parts, 0, 2));
+            $firstName = implode(' ', array_slice($parts, 2));
+        } elseif (count($parts) === 2) {
+            $lastName  = $parts[0];
+            $firstName = $parts[1];
+        } else {
+            $lastName  = $fullName;
+            $firstName = $fullName;
+        }
+
+        try {
+            $response = Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+                ->connectTimeout(5)
+                ->timeout(10)
+                ->post(env('SEFIL_CUSTOMERS_URL') . '/api/v1/customers/', [
+                    'identification' => $identification,
+                    'first_name'     => $firstName,
+                    'last_name'      => $lastName,
+                    'gender'         => $facesContact->Sexo ?? null,
+                    'nationality'    => 'Ecuadorian',
+                    'civil_status'   => $facesContact->Estado_civil ?? null,
+                    'profession'     => $facesContact->sector_economico ?? null,
+                ]);
+
+            if ($response->failed()) {
+                Log::channel('credits')->error("Error creating customer in service", [
+                    'identification' => $identification,
+                    'status'         => $response->status(),
+                    'body'           => $response->body()
+                ]);
+                return null;
+            }
+
+            Log::channel('credits')->info("Customer created in service", ['identification' => $identification]);
+            return $response->json();
+
+        } catch (\Exception $e) {
+            Log::channel('credits')->error("Excepción al crear customer en servicio", [
+                'identification' => $identification,
+                'error'          => $e->getMessage()
+            ]);
+            return null;
+        }
+    }
+
     private function syncContactsForBatch(array $batch)
     {
         $stats = [
@@ -455,6 +507,16 @@ class SynchronizationController extends Controller
 
         $uniqueCIs = array_keys($facesContactByCi);
         $customersByCI = $this->getCustomersBatch($uniqueCIs);
+
+        // FASE 2.5: Crear en el servicio los clientes que no existen aún
+        foreach ($facesContactByCi as $ci => $facesContact) {
+            if (empty($customersByCI[$ci])) {
+                $created = $this->createCustomerInService((string) $ci, $facesContact);
+                if ($created) {
+                    $customersByCI[$ci] = $created;
+                }
+            }
+        }
 
         Log::channel('credits')->info("Processing " . count($allContacts) . " contacts for batch");
 
