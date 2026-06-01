@@ -380,8 +380,8 @@ class SynchronizationController extends Controller
         $servicePhoneType = str_ireplace(['MÓVIL', 'movil'], 'MOVIL', $phoneType);
         try {
             Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
-                ->connectTimeout(5)
-                ->timeout(10)
+                ->connectTimeout(3)
+                ->timeout(5)
                 ->post(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/phones", [
                     'phone_number' => $phoneNumber,
                     'country_code' => '+593',
@@ -400,8 +400,8 @@ class SynchronizationController extends Controller
     {
         try {
             Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
-                ->connectTimeout(5)
-                ->timeout(10)
+                ->connectTimeout(3)
+                ->timeout(5)
                 ->post(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/addresses", [
                     'address_line' => $addr->address ?? null,
                     'province' => $addr->province ?? null,
@@ -507,6 +507,7 @@ class SynchronizationController extends Controller
 
                 foreach ($contacts as $contact) {
                     $contact->credit_sync_id = $creditData->sync_id;
+                    $contact->documento = !empty($contact->documento) ? (string) $contact->documento : null;
                     $allContacts[] = $contact;
                 }
             } catch (\Exception $e) {
@@ -524,11 +525,20 @@ class SynchronizationController extends Controller
         }
 
         // FASE 2: Recopilar CIs únicos y obtener datos completos del servicio de clientes
+        // Castear siempre a string para evitar mismatch entre enteros y strings en PHP/BD
         $facesContactByCi = [];
         foreach ($allContacts as $contact) {
-            $ci = $contact->documento ?? null;
+            $ci = !empty($contact->documento) ? (string) $contact->documento : null;
             if (!empty($ci) && !isset($facesContactByCi[$ci])) {
+                $contact->documento = $ci; // normalizar también en el objeto
                 $facesContactByCi[$ci] = $contact;
+            }
+        }
+
+        // Normalizar también en allContacts para que FASE 6 use strings consistentes
+        foreach ($allContacts as $contact) {
+            if (!empty($contact->documento)) {
+                $contact->documento = (string) $contact->documento;
             }
         }
 
@@ -565,23 +575,21 @@ class SynchronizationController extends Controller
                 // Fallback: usar datos de FACES si el cliente no está en el servicio aún
                 Log::channel('credits')->warning("Customer not found in service, using FACES fallback", ['ci' => $ci]);
                 $clientData = [
-                    'name' => $facesContact->fullName ?? '',
-                    'ci' => $ci,
-                    'gender' => $facesContact->Sexo ?? null,
-                    'civil_status' => $facesContact->Estado_civil ?? null,
+                    'name'              => $facesContact->fullName ?? '',
+                    'ci'                => $ci,
+                    'gender'            => $facesContact->Sexo ?? null,
+                    'civil_status'      => $facesContact->Estado_civil ?? null,
                     'economic_activity' => $facesContact->sector_economico ?? null,
                 ];
             } else {
-                $name = !empty($customer['full_name'])
-                    ? $customer['full_name']
-                    : trim(($customer['first_name'] ?? '') . ' ' . ($customer['last_name'] ?? ''));
-
                 $clientData = [
-                    'name' => $name,
-                    'ci' => $ci,
-                    'gender' => $customer['gender'] ?? null,
-                    'civil_status' => $customer['civil_status'] ?? null,
-                    'economic_activity' => $customer['financial_information']['economic_activity'] ?? null,
+                    // FACES envía el nombre en formato "APELLIDO NOMBRE" — usarlo siempre
+                    // El servicio invierte el orden en full_name (first_name + last_name)
+                    'name'              => $facesContact->fullName ?? trim(($customer['last_name'] ?? '') . ' ' . ($customer['first_name'] ?? '')),
+                    'ci'                => $ci,
+                    'gender'            => $customer['gender'] ?? $facesContact->Sexo ?? null,
+                    'civil_status'      => $customer['civil_status'] ?? $facesContact->Estado_civil ?? null,
+                    'economic_activity' => $customer['financial_information']['economic_activity'] ?? $facesContact->sector_economico ?? null,
                 ];
             }
 
@@ -767,6 +775,94 @@ class SynchronizationController extends Controller
         Log::channel('credits')->info("Contact sync completed for batch", $stats);
 
         return $stats;
+    }
+
+    public function fixClientNames()
+    {
+        set_time_limit(0);
+
+        $updated = 0;
+        $errors  = 0;
+
+        // Obtener todos los CIs de clientes en BD local
+        $allCIs = DB::table(env('SCHEMA_API_CLIENT'))
+            ->pluck('ci')
+            ->map(fn($ci) => (string) $ci)
+            ->toArray();
+
+        Log::channel('credits')->info("Iniciando corrección de nombres para " . count($allCIs) . " clientes");
+
+        // getCustomersBatch ya agrupa en chunks de 200 internamente
+        $customerData = $this->getCustomersBatch($allCIs);
+
+        foreach ($customerData as $ci => $customer) {
+            $lastName  = $customer['last_name']  ?? null;
+            $firstName = $customer['first_name'] ?? null;
+
+            if (empty($lastName) && empty($firstName)) {
+                $errors++;
+                continue;
+            }
+
+            // Reconstruir en formato FACES: APELLIDO NOMBRE
+            $name = trim(($lastName ?? '') . ' ' . ($firstName ?? ''));
+
+            DB::table(env('SCHEMA_API_CLIENT'))
+                ->where('ci', $ci)
+                ->update(['name' => $name, 'updated_at' => now()]);
+
+            $updated++;
+        }
+
+        $notInService = count($allCIs) - $updated - $errors;
+
+        Log::channel('credits')->info("Corrección de nombres en clients completada", [
+            'updated'        => $updated,
+            'not_in_service' => $notInService,
+            'errors'         => $errors
+        ]);
+
+        // Corregir también management.client_name
+        $managementUpdated = 0;
+
+        $managementCIs = DB::table('management')
+            ->whereNotNull('client_identification')
+            ->pluck('client_identification')
+            ->map(fn($ci) => (string) $ci)
+            ->unique()
+            ->toArray();
+
+        Log::channel('credits')->info("Corrigiendo nombres en management para " . count($managementCIs) . " identificaciones");
+
+        $managementCustomers = $this->getCustomersBatch($managementCIs);
+
+        foreach ($managementCustomers as $ci => $customer) {
+            $lastName  = $customer['last_name']  ?? null;
+            $firstName = $customer['first_name'] ?? null;
+
+            if (empty($lastName) && empty($firstName)) continue;
+
+            $name = trim(($lastName ?? '') . ' ' . ($firstName ?? ''));
+
+            DB::table('management')
+                ->where('client_identification', $ci)
+                ->update(['client_name' => $name]);
+
+            $managementUpdated++;
+        }
+
+        Log::channel('credits')->info("Corrección de nombres en management completada", [
+            'updated' => $managementUpdated
+        ]);
+
+        return [
+            'success'                  => true,
+            'clients_total'            => count($allCIs),
+            'clients_updated'          => $updated,
+            'clients_not_in_service'   => $notInService,
+            'clients_errors'           => $errors,
+            'management_updated'       => $managementUpdated,
+        ];
     }
 
     /**
