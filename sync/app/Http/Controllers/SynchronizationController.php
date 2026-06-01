@@ -123,6 +123,7 @@ class SynchronizationController extends Controller
     }
 
     public function syncCredits(){
+        set_time_limit(0);
         Log::channel('credits')->info("-----------------------------------------------------------------------");
         Log::channel('credits')->info($this::getQueryDate());
         $credits = $this->getListCredits($this::getQueryDate());
@@ -336,6 +337,8 @@ class SynchronizationController extends Controller
         if (empty($identifications)) return [];
         try {
             $response = Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+                ->connectTimeout(5)
+                ->timeout(15)
                 ->post(env('SEFIL_CUSTOMERS_URL') . '/api/v1/customers/batch', [
                     'identifications' => array_values($identifications)
                 ]);
@@ -352,11 +355,16 @@ class SynchronizationController extends Controller
 
     private function postPhoneToCustomerService(string $identification, string $phoneNumber, string $phoneType): void
     {
+        // El servicio usa "MOVIL" sin tilde; la BD local usa "MÓVIL"
+        $servicePhoneType = str_ireplace(['MÓVIL', 'movil'], 'MOVIL', $phoneType);
         try {
             Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+                ->connectTimeout(5)
+                ->timeout(10)
                 ->post(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/phones", [
                     'phone_number' => $phoneNumber,
-                    'phone_type' => $phoneType,
+                    'country_code' => '+593',
+                    'phone_type' => $servicePhoneType,
                     'created_by' => 'FACES',
                     'created_source' => 'Collecta'
                 ]);
@@ -371,6 +379,8 @@ class SynchronizationController extends Controller
     {
         try {
             Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+                ->connectTimeout(5)
+                ->timeout(10)
                 ->post(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/addresses", [
                     'address_line' => $addr->address ?? null,
                     'province' => $addr->province ?? null,
@@ -463,21 +473,28 @@ class SynchronizationController extends Controller
             $customer = $customersByCI[$ci] ?? null;
 
             if (empty($customer)) {
-                Log::channel('credits')->warning("Customer not found in service, skipping", ['ci' => $ci]);
-                continue;
+                // Fallback: usar datos de FACES si el cliente no está en el servicio aún
+                Log::channel('credits')->warning("Customer not found in service, using FACES fallback", ['ci' => $ci]);
+                $clientData = [
+                    'name' => $facesContact->fullName ?? '',
+                    'ci' => $ci,
+                    'gender' => $facesContact->Sexo ?? null,
+                    'civil_status' => $facesContact->Estado_civil ?? null,
+                    'economic_activity' => $facesContact->sector_economico ?? null,
+                ];
+            } else {
+                $name = !empty($customer['full_name'])
+                    ? $customer['full_name']
+                    : trim(($customer['first_name'] ?? '') . ' ' . ($customer['last_name'] ?? ''));
+
+                $clientData = [
+                    'name' => $name,
+                    'ci' => $ci,
+                    'gender' => $customer['gender'] ?? null,
+                    'civil_status' => $customer['civil_status'] ?? null,
+                    'economic_activity' => $customer['financial_information']['economic_activity'] ?? null,
+                ];
             }
-
-            $name = !empty($customer['full_name'])
-                ? $customer['full_name']
-                : trim(($customer['first_name'] ?? '') . ' ' . ($customer['last_name'] ?? ''));
-
-            $clientData = [
-                'name' => $name,
-                'ci' => $ci,
-                'gender' => $customer['gender'] ?? null,
-                'civil_status' => $customer['civil_status'] ?? null,
-                'economic_activity' => $customer['financial_information']['economic_activity'] ?? null,
-            ];
 
             if ($existingClients->has($ci)) {
                 $clientData['updated_at'] = $now;
@@ -541,14 +558,17 @@ class SynchronizationController extends Controller
             }
 
             // BD local: usar los teléfonos del servicio como fuente autoritativa
+            // El servicio retorna "MOVIL"; la BD local usa "MÓVIL"
             foreach ($customer['phones'] ?? [] as $phone) {
                 $phoneNumber = $phone['phone_number'] ?? null;
                 if (empty($phoneNumber)) continue;
+                $rawType = $phone['phone_type'] ?? 'MOVIL';
+                $localType = strtoupper($rawType) === 'MOVIL' ? 'MÓVIL' : $rawType;
                 $phonesToInsert[] = [
                     'client_id' => $clientId,
                     'phone_status' => 'ACTIVE',
                     'phone_number' => $phoneNumber,
-                    'phone_type' => $phone['phone_type'] ?? 'MÓVIL',
+                    'phone_type' => $localType,
                     'created_at' => $now,
                     'updated_at' => $now
                 ];
