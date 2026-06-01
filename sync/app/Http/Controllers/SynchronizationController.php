@@ -333,8 +333,8 @@ class SynchronizationController extends Controller
         if (empty($identifications)) return [];
 
         $result = [];
-        // API acepta máximo 200 por llamada; castear a string para evitar mismatch de tipos
-        foreach (array_chunk(array_map('strval', array_values($identifications)), 200) as $chunk) {
+        // Castear a string para evitar mismatch de tipos; chunks de 50 para evitar 500 del servidor
+        foreach (array_chunk(array_map('strval', array_values($identifications)), 50) as $chunk) {
             try {
                 $response = Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
                     ->connectTimeout(5)
@@ -781,49 +781,15 @@ class SynchronizationController extends Controller
     {
         set_time_limit(0);
 
-        $updated = 0;
-        $errors  = 0;
+        $clientsUpdated    = 0;
+        $managementUpdated = 0;
+        $errors            = 0;
 
-        // Obtener todos los CIs de clientes en BD local
-        $allCIs = DB::table(env('SCHEMA_API_CLIENT'))
+        // Obtener todos los CIs únicos (clients + management)
+        $clientCIs = DB::table(env('SCHEMA_API_CLIENT'))
             ->pluck('ci')
             ->map(fn($ci) => (string) $ci)
             ->toArray();
-
-        Log::channel('credits')->info("Iniciando corrección de nombres para " . count($allCIs) . " clientes");
-
-        // getCustomersBatch ya agrupa en chunks de 200 internamente
-        $customerData = $this->getCustomersBatch($allCIs);
-
-        foreach ($customerData as $ci => $customer) {
-            $lastName  = $customer['last_name']  ?? null;
-            $firstName = $customer['first_name'] ?? null;
-
-            if (empty($lastName) && empty($firstName)) {
-                $errors++;
-                continue;
-            }
-
-            // Reconstruir en formato FACES: APELLIDO NOMBRE
-            $name = trim(($lastName ?? '') . ' ' . ($firstName ?? ''));
-
-            DB::table(env('SCHEMA_API_CLIENT'))
-                ->where('ci', $ci)
-                ->update(['name' => $name, 'updated_at' => now()]);
-
-            $updated++;
-        }
-
-        $notInService = count($allCIs) - $updated - $errors;
-
-        Log::channel('credits')->info("Corrección de nombres en clients completada", [
-            'updated'        => $updated,
-            'not_in_service' => $notInService,
-            'errors'         => $errors
-        ]);
-
-        // Corregir también management.client_name
-        $managementUpdated = 0;
 
         $managementCIs = DB::table('management')
             ->whereNotNull('client_identification')
@@ -832,36 +798,66 @@ class SynchronizationController extends Controller
             ->unique()
             ->toArray();
 
-        Log::channel('credits')->info("Corrigiendo nombres en management para " . count($managementCIs) . " identificaciones");
+        $allCIs = array_unique(array_merge($clientCIs, $managementCIs));
 
-        $managementCustomers = $this->getCustomersBatch($managementCIs);
+        Log::channel('credits')->info("Iniciando corrección de nombres", [
+            'clients'    => count($clientCIs),
+            'management' => count($managementCIs),
+            'unique_cis' => count($allCIs)
+        ]);
 
-        foreach ($managementCustomers as $ci => $customer) {
-            $lastName  = $customer['last_name']  ?? null;
-            $firstName = $customer['first_name'] ?? null;
+        // Obtener nombres del servicio en batches de 50
+        $namesByCi = [];
+        $chunks    = array_chunk($allCIs, 50);
+        $total     = count($chunks);
 
-            if (empty($lastName) && empty($firstName)) continue;
+        foreach ($chunks as $index => $chunk) {
+            $customerData = $this->getCustomersBatch($chunk);
 
-            $name = trim(($lastName ?? '') . ' ' . ($firstName ?? ''));
+            foreach ($customerData as $ci => $customer) {
+                $lastName  = $customer['last_name']  ?? null;
+                $firstName = $customer['first_name'] ?? null;
+                if (!empty($lastName) || !empty($firstName)) {
+                    $namesByCi[$ci] = trim(($lastName ?? '') . ' ' . ($firstName ?? ''));
+                }
+            }
 
-            DB::table('management')
-                ->where('client_identification', $ci)
-                ->update(['client_name' => $name]);
-
-            $managementUpdated++;
+            if (($index + 1) % 10 === 0 || ($index + 1) === $total) {
+                Log::channel('credits')->info("fix-names progress: " . ($index + 1) . "/{$total} batches");
+            }
         }
 
-        Log::channel('credits')->info("Corrección de nombres en management completada", [
-            'updated' => $managementUpdated
+        Log::channel('credits')->info("Nombres obtenidos del servicio: " . count($namesByCi));
+
+        // Actualizar clients
+        foreach ($namesByCi as $ci => $name) {
+            $affected = DB::table(env('SCHEMA_API_CLIENT'))
+                ->where('ci', $ci)
+                ->update(['name' => $name, 'updated_at' => now()]);
+            $clientsUpdated += $affected;
+        }
+
+        // Actualizar management
+        foreach ($namesByCi as $ci => $name) {
+            $affected = DB::table('management')
+                ->where('client_identification', $ci)
+                ->update(['client_name' => $name]);
+            $managementUpdated += $affected;
+        }
+
+        Log::channel('credits')->info("Corrección de nombres completada", [
+            'clients_updated'    => $clientsUpdated,
+            'management_updated' => $managementUpdated,
+            'errors'             => $errors
         ]);
 
         return [
-            'success'                  => true,
-            'clients_total'            => count($allCIs),
-            'clients_updated'          => $updated,
-            'clients_not_in_service'   => $notInService,
-            'clients_errors'           => $errors,
-            'management_updated'       => $managementUpdated,
+            'success'            => true,
+            'total_cis'          => count($allCIs),
+            'names_from_service' => count($namesByCi),
+            'clients_updated'    => $clientsUpdated,
+            'management_updated' => $managementUpdated,
+            'errors'             => $errors
         ];
     }
 
