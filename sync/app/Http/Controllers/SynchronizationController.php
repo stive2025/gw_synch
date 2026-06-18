@@ -124,6 +124,7 @@ class SynchronizationController extends Controller
 
     public function syncCredits(){
         set_time_limit(0);
+        ini_set('memory_limit', '-1');
         Log::channel('credits')->info("-----------------------------------------------------------------------");
         Log::channel('credits')->info($this::getQueryDate());
         $credits = $this->getListCredits($this::getQueryDate());
@@ -780,6 +781,7 @@ class SynchronizationController extends Controller
     public function fixClientNames()
     {
         set_time_limit(0);
+        ini_set('memory_limit', '-1');
 
         $clientsUpdated    = 0;
         $managementUpdated = 0;
@@ -910,7 +912,7 @@ class SynchronizationController extends Controller
             'nro_syncs' => count($credits),
             'state'=>'IN-PROGRESS',
             'business_id' => env('BUSINESS_ID'),
-            'campain_id' => $campain_id->id
+            'campain_id' => $campain_id->id ?? null
         ]);
 
         try {
