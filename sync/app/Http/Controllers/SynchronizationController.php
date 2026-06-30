@@ -279,7 +279,7 @@ class SynchronizationController extends Controller
         $today = date('Y-m-d', time() - 18000);
 
         DB::table(env('SCHEMA_API_CREDIT'))
-            ->where('management_promise', '<=', $today)
+            ->where('management_promise', '<', $today)
             ->where('management_tray', 'GESTIONADO')
             ->update(['management_tray' => 'EN PROCESO']);
 
