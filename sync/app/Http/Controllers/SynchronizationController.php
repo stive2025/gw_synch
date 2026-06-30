@@ -135,13 +135,6 @@ class SynchronizationController extends Controller
         $updated = 0;
         $errors = 0;
 
-        $contactsCreated = 0;
-        $contactsUpdated = 0;
-        $phonesCreated = 0;
-        $addressesCreated = 0;
-        $relationshipsCreated = 0;
-        $contactErrors = 0;
-
         Log::channel('credits')->info("Iniciando sincronización de {$totalCredits} créditos");
 
         DB::table(env('SCHEMA_API_STATUS_SYNC'))->insert([
@@ -261,25 +254,11 @@ class SynchronizationController extends Controller
             ];
         }
 
-        // FASE 2: Sincronización de contactos fuera de transacción (incluye HTTP calls)
-        // Reconectar para obtener una conexión fresca después de la transacción larga
-        DB::reconnect();
-
-        foreach (array_chunk($credits, $batchSize) as $batch) {
-            $contactStats = $this->syncContactsForBatch($batch);
-            $contactsCreated     += $contactStats['clients_created'];
-            $contactsUpdated     += $contactStats['clients_updated'];
-            $phonesCreated       += $contactStats['phones_created'];
-            $addressesCreated    += $contactStats['addresses_created'];
-            $relationshipsCreated += $contactStats['relationships_created'];
-            $contactErrors       += $contactStats['errors'];
-        }
-
-        // FASE 3: Ajustes de bandejas post-sync
+        // FASE 3: Ajustes de bandejas post-sync (solo depende de créditos en DB, no de contactos)
         $today = date('Y-m-d', time() - 18000);
 
         DB::table(env('SCHEMA_API_CREDIT'))
-            ->where('management_promise', '<', $today)
+            ->where('management_promise', '<=', $today)
             ->where('management_tray', 'GESTIONADO')
             ->update(['management_tray' => 'EN PROCESO']);
 
@@ -310,6 +289,13 @@ class SynchronizationController extends Controller
                 'updated_at' => now()
             ]);
 
+        // FASE 2: Despachar jobs de contactos en background (HTTP calls al servicio de clientes)
+        $batches = array_chunk($credits, $batchSize);
+        foreach ($batches as $batch) {
+            \App\Jobs\SyncContactsBatchJob::dispatch($batch);
+        }
+        Log::channel('credits')->info("Despachados " . count($batches) . " jobs de contactos en cola");
+
         return [
             'success' => true,
             'credits' => [
@@ -318,17 +304,68 @@ class SynchronizationController extends Controller
                 'total'   => $totalCredits,
                 'errors'  => $errors
             ],
-            'contacts' => [
-                'clients_created'      => $contactsCreated,
-                'clients_updated'      => $contactsUpdated,
-                'phones_created'       => $phonesCreated,
-                'addresses_created'    => $addressesCreated,
-                'relationships_created' => $relationshipsCreated,
-                'errors'               => $contactErrors
-            ]
+            'contacts' => 'procesando en background (' . count($batches) . ' jobs despachados)'
         ];
     }
-    
+
+    /**
+     * Respaldo: re-sincroniza solo contactos de créditos ya existentes en DB.
+     * No toca la tabla de créditos ni llama a FACES para créditos.
+     * ?async=false para ejecutar en línea sin cola (útil si el worker no está activo).
+     */
+    public function syncContactsOnly(\Illuminate\Http\Request $request)
+    {
+        set_time_limit(0);
+        ini_set('memory_limit', '-1');
+
+        $syncIds = DB::table(env('SCHEMA_API_CREDIT'))
+            ->where('sync_status', 'ACTIVE')
+            ->pluck('sync_id')
+            ->toArray();
+
+        if (empty($syncIds)) {
+            return ['success' => false, 'message' => 'No hay créditos ACTIVE en la base de datos'];
+        }
+
+        // Objetos mínimos: syncContactsForBatch solo necesita sync_id de cada crédito
+        $credits = array_map(fn($id) => (object) ['sync_id' => $id], $syncIds);
+        $batchSize = 500;
+        $batches   = array_chunk($credits, $batchSize);
+        $async     = $request->query('async', 'true') !== 'false';
+
+        $mode = $async ? 'async' : 'sync';
+        Log::channel('credits')->info("syncContactsOnly: {$mode} — " . count($syncIds) . " créditos en " . count($batches) . " batches");
+
+        if ($async) {
+            foreach ($batches as $batch) {
+                \App\Jobs\SyncContactsBatchJob::dispatch($batch);
+            }
+            return [
+                'success'        => true,
+                'mode'           => 'async',
+                'credits'        => count($syncIds),
+                'jobs_dispatched'=> count($batches),
+            ];
+        }
+
+        // Modo síncrono (fallback si el worker no está activo)
+        DB::reconnect();
+        $stats = ['clients_created' => 0, 'clients_updated' => 0, 'phones_created' => 0, 'addresses_created' => 0, 'relationships_created' => 0, 'errors' => 0];
+        foreach ($batches as $batch) {
+            $batchStats = $this->syncContactsForBatch($batch);
+            foreach ($stats as $key => &$val) {
+                $val += $batchStats[$key];
+            }
+        }
+
+        return [
+            'success' => true,
+            'mode'    => 'sync',
+            'credits' => count($syncIds),
+            'stats'   => $stats,
+        ];
+    }
+
     private function getCustomersBatch(array $identifications): array
     {
         if (empty($identifications)) return [];
@@ -481,7 +518,7 @@ class SynchronizationController extends Controller
         }
     }
 
-    private function syncContactsForBatch(array $batch)
+    public function syncContactsForBatch(array $batch)
     {
         $stats = [
             'clients_created' => 0,

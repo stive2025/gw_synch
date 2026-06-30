@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y \
     libonig-dev \
     libxml2-dev \
     zip \
-    unzip
-
+    unzip \
+    supervisor
 # Limpiar cache
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -25,6 +25,9 @@ WORKDIR /var/www/html
 # Copiar archivos de la aplicación
 COPY ./sync /var/www/html
 
+# Copiar configuración de supervisor
+COPY ./supervisord.conf /etc/supervisord.conf
+
 # Instalar dependencias de PHP
 RUN composer install --no-dev --optimize-autoloader
 
@@ -37,5 +40,5 @@ RUN mkdir -p storage/framework/{sessions,views,cache} \
 # Exponer el puerto 8000
 EXPOSE 8000
 
-# Comando para iniciar el servidor
-CMD php artisan serve --host=0.0.0.0 --port=8000
+# Iniciar supervisord (maneja webserver + queue worker)
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]

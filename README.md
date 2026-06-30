@@ -52,13 +52,64 @@ docker exec -it <container_id> bash
 docker exec -it <container_id> php artisan <comando>
 ```
 
+## Endpoints de Sincronización
+
+### Sincronizar créditos
+```
+GET /api/syncs/credits
+```
+Sincroniza créditos desde FACES, actualiza bandejas y despacha los jobs de contactos en background.
+
+### Sincronizar pagos
+```
+GET /api/syncs/pays
+```
+
+### Re-sincronizar solo contactos (método de respaldo)
+```
+GET /api/syncs/credits/contacts
+```
+Re-sincroniza contactos, teléfonos y direcciones de los créditos que ya están en la base de datos **sin volver a correr el sync de créditos desde cero**. Útil cuando el sync de créditos completó correctamente pero los jobs de contactos fallaron o no se procesaron.
+
+**Modos de ejecución:**
+
+| Modo | URL | Descripción |
+|------|-----|-------------|
+| Asíncrono (default) | `/api/syncs/credits/contacts` | Despacha jobs a la cola — requiere worker activo |
+| Síncrono (respaldo) | `/api/syncs/credits/contacts?async=false` | Ejecuta en línea — no necesita worker |
+
+**Cuándo usar `?async=false`:**
+- El worker de la cola no está corriendo
+- Se necesita verificar el resultado inmediatamente
+- Se está debuggeando el proceso de contactos
+
+**Verificar el worker:**
+```bash
+docker exec -it <container_id> supervisorctl status
+```
+
+**Ver logs del worker:**
+```bash
+docker exec -it <container_id> tail -f /var/www/html/storage/logs/worker.log
+```
+
+**Ver jobs fallidos:**
+```bash
+docker exec -it <container_id> php artisan queue:failed
+```
+
+**Reintentar jobs fallidos:**
+```bash
+docker exec -it <container_id> php artisan queue:retry all
+```
+
 ## Configuración Docker
 
 El Dockerfile incluye:
 - PHP 8.2 CLI
 - Extensiones: PDO MySQL, GD, MBString, BCMath, etc.
 - Composer para gestión de dependencias
-- Servidor integrado de Laravel (`php artisan serve`)
+- Supervisor: ejecuta el servidor web y el worker de colas simultáneamente
 - Puerto expuesto: 8000
 
 ## Tecnologías
