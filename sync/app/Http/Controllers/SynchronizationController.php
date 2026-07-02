@@ -492,9 +492,10 @@ class SynchronizationController extends Controller
                 ]);
 
             if ($response->status() === 409) {
-                // Ya existe en el servicio pero el batch no lo retornó (mismatch de tipo en CI)
-                Log::channel('credits')->info("Customer already exists in service, fetching", ['identification' => $identification]);
-                return $this->getCustomerFromService($identification);
+                // Ya existe en el servicio — el GET individual no aporta nada útil porque
+                // la fase 3 usa fallback a datos FACES si customer es null, y los POSTs de
+                // teléfonos/direcciones solo necesitan el CI, no el objeto customer.
+                return null;
             }
 
             if ($response->failed()) {
@@ -820,83 +821,175 @@ class SynchronizationController extends Controller
         set_time_limit(0);
         ini_set('memory_limit', '-1');
 
-        $clientsUpdated    = 0;
-        $managementUpdated = 0;
-        $errors            = 0;
+        $clientsUpdated       = 0;
+        $managementUpdated    = 0;
+        $customersCreated     = 0;
+        $relationshipsCreated = 0;
+        $relationshipsUpdated = 0;
+        $errors               = 0;
 
-        // Obtener todos los CIs únicos (clients + management)
-        $clientCIs = DB::table(env('SCHEMA_API_CLIENT'))
-            ->pluck('ci')
-            ->map(fn($ci) => (string) $ci)
-            ->toArray();
+        $activeCredits = DB::table(env('SCHEMA_API_CREDIT'))
+            ->where('sync_status', 'ACTIVE')
+            ->select('id', 'sync_id')
+            ->get();
 
-        $managementCIs = DB::table('management')
-            ->whereNotNull('client_identification')
-            ->pluck('client_identification')
-            ->map(fn($ci) => (string) $ci)
-            ->unique()
-            ->toArray();
+        $batches      = $activeCredits->chunk(500)->values();
+        $totalBatches = $batches->count();
 
-        $allCIs = array_unique(array_merge($clientCIs, $managementCIs));
-
-        Log::channel('credits')->info("Iniciando corrección de nombres", [
-            'clients'    => count($clientCIs),
-            'management' => count($managementCIs),
-            'unique_cis' => count($allCIs)
+        Log::channel('credits')->info("Iniciando corrección de nombres (titular/garantes)", [
+            'active_credits' => $activeCredits->count(),
+            'batches'        => $totalBatches
         ]);
 
-        // Obtener nombres del servicio en batches de 50
-        $namesByCi = [];
-        $chunks    = array_chunk($allCIs, 50);
-        $total     = count($chunks);
+        foreach ($batches as $batchIndex => $creditBatch) {
+            // FASE 1: contactos (titular + garantes) desde FACES para cada crédito del batch
+            $allContacts = [];
+            foreach ($creditBatch as $credit) {
+                try {
+                    $contacts = $this->getListContacts($credit->sync_id);
 
-        foreach ($chunks as $index => $chunk) {
-            $customerData = $this->getCustomersBatch($chunk);
+                    if ($contacts === null || !is_array($contacts)) {
+                        $errors++;
+                        continue;
+                    }
 
-            foreach ($customerData as $ci => $customer) {
-                $lastName  = $customer['last_name']  ?? null;
-                $firstName = $customer['first_name'] ?? null;
-                if (!empty($lastName) || !empty($firstName)) {
-                    $namesByCi[$ci] = trim(($lastName ?? '') . ' ' . ($firstName ?? ''));
+                    foreach ($contacts as $contact) {
+                        $contact->credit_id = $credit->id;
+                        $contact->documento = !empty($contact->documento) ? (string) $contact->documento : null;
+                        $allContacts[] = $contact;
+                    }
+                } catch (\Exception $e) {
+                    Log::channel('credits')->error("Error fetching contacts for credit", [
+                        'sync_id' => $credit->sync_id, 'error' => $e->getMessage()
+                    ]);
+                    $errors++;
                 }
             }
 
-            if (($index + 1) % 10 === 0 || ($index + 1) === $total) {
-                Log::channel('credits')->info("fix-names progress: " . ($index + 1) . "/{$total} batches");
+            if (empty($allContacts)) {
+                Log::channel('credits')->info("fix-names progress: " . ($batchIndex + 1) . "/{$totalBatches} batches");
+                continue;
             }
-        }
 
-        Log::channel('credits')->info("Nombres obtenidos del servicio: " . count($namesByCi));
+            // FASE 2: CIs únicos del batch y consulta batch al servicio centralizado
+            $facesContactByCi = [];
+            foreach ($allContacts as $contact) {
+                $ci = $contact->documento;
+                if (!empty($ci) && !isset($facesContactByCi[$ci])) {
+                    $facesContactByCi[$ci] = $contact;
+                }
+            }
 
-        // Actualizar clients
-        foreach ($namesByCi as $ci => $name) {
-            $affected = DB::table(env('SCHEMA_API_CLIENT'))
-                ->where('ci', $ci)
-                ->update(['name' => $name, 'updated_at' => now()]);
-            $clientsUpdated += $affected;
-        }
+            $uniqueCIs     = array_keys($facesContactByCi);
+            $customersByCI = $this->getCustomersBatch($uniqueCIs);
 
-        // Actualizar management
-        foreach ($namesByCi as $ci => $name) {
-            $affected = DB::table('management')
-                ->where('client_identification', $ci)
-                ->update(['client_name' => $name]);
-            $managementUpdated += $affected;
+            // FASE 2.5: crear en el servicio los titulares/garantes que aún no existen
+            foreach ($facesContactByCi as $ci => $facesContact) {
+                if (empty($customersByCI[$ci])) {
+                    $created = $this->createCustomerInService($ci, $facesContact);
+                    if ($created) {
+                        $customersByCI[$ci] = $created;
+                        $customersCreated++;
+                    }
+                }
+            }
+
+            // Corrección de nombres en client/management con los datos del servicio
+            foreach ($customersByCI as $ci => $customer) {
+                $lastName  = $customer['last_name']  ?? null;
+                $firstName = $customer['first_name'] ?? null;
+                if (empty($lastName) && empty($firstName)) continue;
+
+                $name = trim(($lastName ?? '') . ' ' . ($firstName ?? ''));
+
+                $clientsUpdated += DB::table(env('SCHEMA_API_CLIENT'))
+                    ->where('ci', $ci)
+                    ->update(['name' => $name, 'updated_at' => now()]);
+
+                $managementUpdated += DB::table('management')
+                    ->where('client_identification', $ci)
+                    ->update(['client_name' => $name]);
+            }
+
+            // FASE 6: relaciones client_credit (titular/garantes)
+            $now = now();
+            $relationshipsMap = [];
+            foreach ($allContacts as $contact) {
+                $ci       = $contact->documento ?? null;
+                $creditId = $contact->credit_id ?? null;
+                if (empty($ci) || empty($creditId)) continue;
+
+                $type = $contact->type ?? 'TITULAR';
+                $key  = $ci . '|' . $creditId;
+
+                if (!isset($relationshipsMap[$key])) {
+                    $relationshipsMap[$key] = [
+                        'identification' => (string) $ci,
+                        'credit_id'      => $creditId,
+                        'type'           => $type,
+                        'created_at'     => $now,
+                        'updated_at'     => $now
+                    ];
+                } else {
+                    $relationshipsMap[$key]['type']       = $type;
+                    $relationshipsMap[$key]['updated_at'] = $now;
+                }
+            }
+
+            if (!empty($relationshipsMap)) {
+                $identifications = array_unique(array_column($relationshipsMap, 'identification'));
+                $creditIds       = array_unique(array_column($relationshipsMap, 'credit_id'));
+
+                $existingRelationships = DB::table('client_credit')
+                    ->whereIn('identification', $identifications)
+                    ->whereIn('credit_id', $creditIds)
+                    ->get()
+                    ->keyBy(fn($rel) => $rel->identification . '|' . $rel->credit_id);
+
+                $toInsert = [];
+
+                foreach ($relationshipsMap as $key => $rel) {
+                    if ($existingRelationships->has($key)) {
+                        $existing = $existingRelationships->get($key);
+                        if ($existing->type !== $rel['type']) {
+                            DB::table('client_credit')
+                                ->where('identification', $rel['identification'])
+                                ->where('credit_id', $rel['credit_id'])
+                                ->update(['type' => $rel['type'], 'updated_at' => $now]);
+                            $relationshipsUpdated++;
+                        }
+                    } else {
+                        $toInsert[] = $rel;
+                    }
+                }
+
+                if (!empty($toInsert)) {
+                    DB::table('client_credit')->insert($toInsert);
+                    $relationshipsCreated += count($toInsert);
+                }
+            }
+
+            Log::channel('credits')->info("fix-names progress: " . ($batchIndex + 1) . "/{$totalBatches} batches");
         }
 
         Log::channel('credits')->info("Corrección de nombres completada", [
-            'clients_updated'    => $clientsUpdated,
-            'management_updated' => $managementUpdated,
-            'errors'             => $errors
+            'clients_updated'       => $clientsUpdated,
+            'management_updated'    => $managementUpdated,
+            'customers_created'     => $customersCreated,
+            'relationships_created' => $relationshipsCreated,
+            'relationships_updated' => $relationshipsUpdated,
+            'errors'                => $errors
         ]);
 
         return [
-            'success'            => true,
-            'total_cis'          => count($allCIs),
-            'names_from_service' => count($namesByCi),
-            'clients_updated'    => $clientsUpdated,
-            'management_updated' => $managementUpdated,
-            'errors'             => $errors
+            'success'               => true,
+            'active_credits'        => $activeCredits->count(),
+            'clients_updated'       => $clientsUpdated,
+            'management_updated'    => $managementUpdated,
+            'customers_created'     => $customersCreated,
+            'relationships_created' => $relationshipsCreated,
+            'relationships_updated' => $relationshipsUpdated,
+            'errors'                => $errors
         ];
     }
 
