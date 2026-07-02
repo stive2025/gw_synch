@@ -828,30 +828,31 @@ class SynchronizationController extends Controller
         $relationshipsUpdated = 0;
         $errors               = 0;
 
-        $activeCredits = DB::table(env('SCHEMA_API_CREDIT'))
+        $totalActiveCredits = DB::table(env('SCHEMA_API_CREDIT'))
             ->where('business_id', env('BUSINESS_ID'))
             ->where('sync_status', 'ACTIVE')
             ->select('id', 'sync_id')
             ->get();
 
-        // Priorizar créditos sin ninguna relación en client_credit
-        $creditIdsWithRelations = DB::table('client_credit')
-            ->whereIn('credit_id', $activeCredits->pluck('id'))
+        // Solo créditos sin ninguna relación en client_credit o sin titular asignado
+        $creditIdsWithTitular = DB::table('client_credit')
+            ->whereIn('credit_id', $totalActiveCredits->pluck('id'))
+            ->where('type', 'TITULAR')
             ->distinct()
             ->pluck('credit_id')
             ->flip();
 
-        $activeCredits = $activeCredits
-            ->sortBy(fn($credit) => isset($creditIdsWithRelations[$credit->id]) ? 1 : 0)
+        $activeCredits = $totalActiveCredits
+            ->reject(fn($credit) => isset($creditIdsWithTitular[$credit->id]))
             ->values();
 
         $batches      = $activeCredits->chunk(500)->values();
         $totalBatches = $batches->count();
 
         Log::channel('credits')->info("Iniciando corrección de nombres (titular/garantes)", [
-            'active_credits'      => $activeCredits->count(),
-            'without_relations'   => $activeCredits->count() - $creditIdsWithRelations->count(),
-            'batches'             => $totalBatches
+            'total_active_credits' => $totalActiveCredits->count(),
+            'credits_to_process'   => $activeCredits->count(),
+            'batches'              => $totalBatches
         ]);
 
         foreach ($batches as $batchIndex => $creditBatch) {
