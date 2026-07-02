@@ -829,16 +829,29 @@ class SynchronizationController extends Controller
         $errors               = 0;
 
         $activeCredits = DB::table(env('SCHEMA_API_CREDIT'))
+            ->where('business_id', env('BUSINESS_ID'))
             ->where('sync_status', 'ACTIVE')
             ->select('id', 'sync_id')
             ->get();
+
+        // Priorizar créditos sin ninguna relación en client_credit
+        $creditIdsWithRelations = DB::table('client_credit')
+            ->whereIn('credit_id', $activeCredits->pluck('id'))
+            ->distinct()
+            ->pluck('credit_id')
+            ->flip();
+
+        $activeCredits = $activeCredits
+            ->sortBy(fn($credit) => isset($creditIdsWithRelations[$credit->id]) ? 1 : 0)
+            ->values();
 
         $batches      = $activeCredits->chunk(500)->values();
         $totalBatches = $batches->count();
 
         Log::channel('credits')->info("Iniciando corrección de nombres (titular/garantes)", [
-            'active_credits' => $activeCredits->count(),
-            'batches'        => $totalBatches
+            'active_credits'      => $activeCredits->count(),
+            'without_relations'   => $activeCredits->count() - $creditIdsWithRelations->count(),
+            'batches'             => $totalBatches
         ]);
 
         foreach ($batches as $batchIndex => $creditBatch) {
