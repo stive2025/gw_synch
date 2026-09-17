@@ -292,7 +292,11 @@ class SynchronizationController extends Controller
             ]);
 
         // FASE 2: Despachar jobs de contactos en background (HTTP calls al servicio de clientes)
-        $batches = array_chunk($credits, $batchSize);
+        // Batch más pequeño que el de DB: cada contacto puede generar varias llamadas HTTP
+        // secuenciales (teléfonos, direcciones, customer), y con lotes de 500 el job supera
+        // el timeout de la cola (1800s) y se pierde todo el resto del lote sin procesar.
+        $contactsBatchSize = 50;
+        $batches = array_chunk($credits, $contactsBatchSize);
         foreach ($batches as $batch) {
             \App\Jobs\SyncContactsBatchJob::dispatch($batch);
         }
@@ -330,8 +334,11 @@ class SynchronizationController extends Controller
         }
 
         // Objetos mínimos: syncContactsForBatch solo necesita sync_id de cada crédito
+        // Batch pequeño: cada contacto puede generar varias llamadas HTTP secuenciales
+        // (teléfonos, direcciones, customer) y con lotes grandes el job supera el timeout
+        // de la cola (1800s), perdiendo todo el resto del lote sin procesar.
         $credits = array_map(fn($id) => (object) ['sync_id' => $id], $syncIds);
-        $batchSize = 500;
+        $batchSize = 50;
         $batches   = array_chunk($credits, $batchSize);
         $async     = $request->query('async', 'true') !== 'false';
 
