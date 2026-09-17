@@ -5,6 +5,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/syncs/credits',[SynchronizationController::class,'syncCredits']);
 Route::get('/syncs/credits/contacts',[SynchronizationController::class,'syncContactsOnly']);
+Route::get('/syncs/credits/{sync_id}/contacts',[SynchronizationController::class,'syncContactsOnlyForCredit']);
 Route::get('/syncs/clients/fix-names',[SynchronizationController::class,'fixClientNames']);
 Route::get('/syncs/pays',[SynchronizationController::class,'syncPays']);
 Route::get('/syncs/pays/alt',[SynchronizationController::class,'syncPaysAlt']);

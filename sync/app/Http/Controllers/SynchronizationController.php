@@ -58,9 +58,11 @@ class SynchronizationController extends Controller
 
     private function getListContacts(string $sync_id){
         try {
-            $response = Http::post(env('FACES_LIST_CONTACTS'), [
-                'credNumeroOperacion' => $sync_id
-            ]);
+            $response = Http::connectTimeout(5)
+                ->timeout(20)
+                ->post(env('FACES_LIST_CONTACTS'), [
+                    'credNumeroOperacion' => $sync_id
+                ]);
 
             if ($response->failed()) {
                 Log::channel('credits')->error("Error en la petición HTTP a FACES_LIST_CONTACTS", [
@@ -258,7 +260,7 @@ class SynchronizationController extends Controller
         $today = date('Y-m-d', time() - 18000);
 
         DB::table(env('SCHEMA_API_CREDIT'))
-            ->where('management_promise', '<=', $today)
+            ->where('management_promise', '<', $today)
             ->where('management_tray', 'GESTIONADO')
             ->update(['management_tray' => 'EN PROCESO']);
 
@@ -366,6 +368,52 @@ class SynchronizationController extends Controller
         ];
     }
 
+    /**
+     * Respaldo: re-sincroniza solo los contactos de un crédito específico ya existente en DB.
+     * No toca la tabla de créditos ni llama a FACES para créditos.
+     * ?async=false para ejecutar en línea sin cola (útil si el worker no está activo).
+     */
+    public function syncContactsOnlyForCredit(\Illuminate\Http\Request $request, string $sync_id)
+    {
+        set_time_limit(0);
+        ini_set('memory_limit', '-1');
+
+        $exists = DB::table(env('SCHEMA_API_CREDIT'))
+            ->where('sync_id', $sync_id)
+            ->exists();
+
+        if (!$exists) {
+            return ['success' => false, 'message' => "No existe el crédito con sync_id {$sync_id} en la base de datos"];
+        }
+
+        $credits = [(object) ['sync_id' => $sync_id]];
+        $async   = $request->query('async', 'true') !== 'false';
+
+        $mode = $async ? 'async' : 'sync';
+        Log::channel('credits')->info("syncContactsOnlyForCredit: {$mode} — crédito {$sync_id}");
+
+        if ($async) {
+            \App\Jobs\SyncContactsBatchJob::dispatch($credits);
+            return [
+                'success'         => true,
+                'mode'            => 'async',
+                'sync_id'         => $sync_id,
+                'jobs_dispatched' => 1,
+            ];
+        }
+
+        // Modo síncrono (fallback si el worker no está activo)
+        DB::reconnect();
+        $stats = $this->syncContactsForBatch($credits);
+
+        return [
+            'success' => true,
+            'mode'    => 'sync',
+            'sync_id' => $sync_id,
+            'stats'   => $stats,
+        ];
+    }
+
     private function getCustomersBatch(array $identifications): array
     {
         if (empty($identifications)) return [];
@@ -384,10 +432,12 @@ class SynchronizationController extends Controller
                     Log::channel('credits')->error("Error batch customers service", ['status' => $response->status()]);
                     continue;
                 }
-                $result = array_merge(
-                    $result,
-                    collect($response->json() ?? [])->keyBy('identification')->toArray()
-                );
+                $found = collect($response->json() ?? [])->keyBy('identification')->toArray();
+                Log::channel('credits')->info("Customers batch ok", [
+                    'requested' => count($chunk),
+                    'found'     => count($found)
+                ]);
+                $result = array_merge($result, $found);
             } catch (\Exception $e) {
                 Log::channel('credits')->error("Excepción batch customers: " . $e->getMessage());
             }
@@ -495,6 +545,7 @@ class SynchronizationController extends Controller
                 // Ya existe en el servicio — el GET individual no aporta nada útil porque
                 // la fase 3 usa fallback a datos FACES si customer es null, y los POSTs de
                 // teléfonos/direcciones solo necesitan el CI, no el objeto customer.
+                Log::channel('credits')->info("Customer ya existe en servicio (409)", ['identification' => $identification]);
                 return null;
             }
 
@@ -863,9 +914,17 @@ class SynchronizationController extends Controller
                     $contacts = $this->getListContacts($credit->sync_id);
 
                     if ($contacts === null || !is_array($contacts)) {
+                        Log::channel('credits')->warning("FACES_LIST_CONTACTS sin resultado", [
+                            'sync_id' => $credit->sync_id
+                        ]);
                         $errors++;
                         continue;
                     }
+
+                    Log::channel('credits')->info("FACES_LIST_CONTACTS ok", [
+                        'sync_id'  => $credit->sync_id,
+                        'contacts' => count($contacts)
+                    ]);
 
                     foreach ($contacts as $contact) {
                         $contact->credit_id = $credit->id;
