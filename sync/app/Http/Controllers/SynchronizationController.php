@@ -463,12 +463,12 @@ class SynchronizationController extends Controller
         }
     }
 
-    private function postPhoneToCustomerService(string $identification, string $phoneNumber, string $phoneType): void
+    private function postPhoneToCustomerService(string $identification, string $phoneNumber, string $phoneType): bool
     {
         // El servicio usa "MOVIL" sin tilde; la BD local usa "MÓVIL"
         $servicePhoneType = str_ireplace(['MÓVIL', 'movil'], 'MOVIL', $phoneType);
         try {
-            Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+            $response = Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
                 ->connectTimeout(3)
                 ->timeout(5)
                 ->post(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/phones", [
@@ -478,17 +478,29 @@ class SynchronizationController extends Controller
                     'created_by' => 'FACES',
                     'created_source' => 'Collecta'
                 ]);
+
+            if ($response->failed()) {
+                Log::channel('credits')->error("Error en respuesta al crear teléfono en customer service", [
+                    'identification' => $identification,
+                    'status'         => $response->status(),
+                    'body'           => $response->body()
+                ]);
+                return false;
+            }
+
+            return true;
         } catch (\Exception $e) {
             Log::channel('credits')->error("Error posting phone to customer service", [
                 'identification' => $identification, 'error' => $e->getMessage()
             ]);
+            return false;
         }
     }
 
-    private function postAddressToCustomerService(string $identification, object $addr, string $addressType): void
+    private function postAddressToCustomerService(string $identification, object $addr, string $addressType): bool
     {
         try {
-            Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
+            $response = Http::withHeaders(['X-API-Key' => env('SEFIL_CUSTOMERS_API_KEY')])
                 ->connectTimeout(3)
                 ->timeout(5)
                 ->post(env('SEFIL_CUSTOMERS_URL') . "/api/v1/customers/{$identification}/addresses", [
@@ -504,10 +516,22 @@ class SynchronizationController extends Controller
                     'created_by' => 'FACES',
                     'created_source' => 'Collecta'
                 ]);
+
+            if ($response->failed()) {
+                Log::channel('credits')->error("Error en respuesta al crear dirección en customer service", [
+                    'identification' => $identification,
+                    'status'         => $response->status(),
+                    'body'           => $response->body()
+                ]);
+                return false;
+            }
+
+            return true;
         } catch (\Exception $e) {
             Log::channel('credits')->error("Error posting address to customer service", [
                 'identification' => $identification, 'error' => $e->getMessage()
             ]);
+            return false;
         }
     }
 
@@ -738,16 +762,22 @@ class SynchronizationController extends Controller
             if (!empty($facesContact->mobile_phones)) {
                 foreach (array_filter(array_map('trim', explode(',', $facesContact->mobile_phones)), fn($p) => !empty($p)) as $phone) {
                     if (!in_array($phone, $servicePhoneNumbers)) {
-                        $this->postPhoneToCustomerService($ci, $phone, 'MÓVIL');
-                        $stats['phones_created']++;
+                        if ($this->postPhoneToCustomerService($ci, $phone, 'MÓVIL')) {
+                            $stats['phones_created']++;
+                        } else {
+                            $stats['errors']++;
+                        }
                     }
                 }
             }
             if (!empty($facesContact->landline_phones)) {
                 foreach (array_filter(array_map('trim', explode(',', $facesContact->landline_phones)), fn($p) => !empty($p)) as $phone) {
                     if (!in_array($phone, $servicePhoneNumbers)) {
-                        $this->postPhoneToCustomerService($ci, $phone, 'FIJO');
-                        $stats['phones_created']++;
+                        if ($this->postPhoneToCustomerService($ci, $phone, 'FIJO')) {
+                            $stats['phones_created']++;
+                        } else {
+                            $stats['errors']++;
+                        }
                     }
                 }
             }
@@ -765,14 +795,20 @@ class SynchronizationController extends Controller
 
             if (!empty($facesContact->direccion_domicilio) && is_object($facesContact->direccion_domicilio)) {
                 if (!in_array('DOMICILIO', $serviceAddressTypes)) {
-                    $this->postAddressToCustomerService($ci, $facesContact->direccion_domicilio, 'DOMICILIO');
-                    $stats['addresses_created']++;
+                    if ($this->postAddressToCustomerService($ci, $facesContact->direccion_domicilio, 'DOMICILIO')) {
+                        $stats['addresses_created']++;
+                    } else {
+                        $stats['errors']++;
+                    }
                 }
             }
             if (!empty($facesContact->direccion_trabajo) && is_object($facesContact->direccion_trabajo)) {
                 if (!in_array('TRABAJO', $serviceAddressTypes)) {
-                    $this->postAddressToCustomerService($ci, $facesContact->direccion_trabajo, 'TRABAJO');
-                    $stats['addresses_created']++;
+                    if ($this->postAddressToCustomerService($ci, $facesContact->direccion_trabajo, 'TRABAJO')) {
+                        $stats['addresses_created']++;
+                    } else {
+                        $stats['errors']++;
+                    }
                 }
             }
         }
