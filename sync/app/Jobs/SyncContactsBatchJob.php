@@ -24,8 +24,18 @@ class SyncContactsBatchJob implements ShouldQueue
         set_time_limit(0);
         ini_set('memory_limit', '-1');
 
+        Log::channel('credits')->info('Job contactos iniciado', ['creditos' => count($this->batch)]);
+
         $stats = (new SynchronizationController())->syncContactsForBatch($this->batch);
 
         Log::channel('credits')->info('Job contactos completado', $stats);
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        Log::channel('credits')->error('Job contactos falló', [
+            'creditos' => count($this->batch),
+            'error' => $exception->getMessage()
+        ]);
     }
 }

@@ -583,8 +583,13 @@ class SynchronizationController extends Controller
 
         // FASE 1: Obtener contactos por crédito desde FACES (CI + tipo + datos de respaldo)
         $allContacts = [];
+        Log::channel('credits')->info("Iniciando lectura de contactos en FACES para batch de " . count($batch) . " crédito(s)");
         foreach ($batch as $creditData) {
             try {
+                Log::channel('credits')->info("Consultando contactos en FACES", [
+                    'sync_id' => $creditData->sync_id
+                ]);
+
                 $contacts = $this->getListContacts($creditData->sync_id);
 
                 if ($contacts === null || !is_array($contacts)) {
@@ -594,6 +599,11 @@ class SynchronizationController extends Controller
                     $stats['errors']++;
                     continue;
                 }
+
+                Log::channel('credits')->info("Contactos obtenidos de FACES", [
+                    'sync_id' => $creditData->sync_id,
+                    'total_contactos' => count($contacts)
+                ]);
 
                 foreach ($contacts as $contact) {
                     $contact->credit_sync_id = $creditData->sync_id;
