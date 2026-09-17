@@ -371,7 +371,8 @@ class SynchronizationController extends Controller
     /**
      * Respaldo: re-sincroniza solo los contactos de un crédito específico ya existente en DB.
      * No toca la tabla de créditos ni llama a FACES para créditos.
-     * ?async=false para ejecutar en línea sin cola (útil si el worker no está activo).
+     * Por defecto corre en línea (sin cola) para garantizar que solo se consulte ese crédito
+     * y no quede detrás del backlog de jobs de syncContactsOnly. ?async=true para encolarlo.
      */
     public function syncContactsOnlyForCredit(\Illuminate\Http\Request $request, string $sync_id)
     {
@@ -387,7 +388,7 @@ class SynchronizationController extends Controller
         }
 
         $credits = [(object) ['sync_id' => $sync_id]];
-        $async   = $request->query('async', 'true') !== 'false';
+        $async   = $request->query('async', 'false') === 'true';
 
         $mode = $async ? 'async' : 'sync';
         Log::channel('credits')->info("syncContactsOnlyForCredit: {$mode} — crédito {$sync_id}");
